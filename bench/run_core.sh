@@ -95,13 +95,25 @@ done
 sleep 1
 ip link del upfgtp 2>/dev/null || true
 
+# Whoever still holds our ports is a leftover, whatever its command line looks
+# like. Resolve it from the socket rather than guessing at pkill patterns, kill
+# it, and only give up if the port is still taken afterwards.
 for port in 2152 38412; do
-  if ss -Hlnu "sport = :${port}" 2>/dev/null | grep -q . || \
-     ss -Hln "sport = :${port}" 2>/dev/null | grep -q .; then
-    echo "port ${port} is still bound by a leftover process:" >&2
-    ss -lnp "sport = :${port}" >&2 || true
-    exit 6
-  fi
+  for attempt in 1 2; do
+    # `|| true`: with pipefail, grep finding nothing (the normal case) would
+    # otherwise fail the assignment and set -e would end the script in silence.
+    holders=$(ss -Hlnp "sport = :${port}" 2>/dev/null |
+              grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u || true)
+    [[ -z "$holders" ]] && break
+    if [[ "$attempt" -eq 2 ]]; then
+      echo "port ${port} is still bound after cleanup:" >&2
+      ss -lnp "sport = :${port}" >&2 || true
+      exit 6
+    fi
+    echo "port ${port} held by pid(s) ${holders} from an earlier run; clearing" >&2
+    for p in $holders; do kill -9 "$p" 2>/dev/null || true; done
+    sleep 1
+  done
 done
 
 start_nf upf "${FREE5GC}/bin/upf" "${PROJ}/config/upfcfg.yaml"
@@ -131,7 +143,23 @@ AMF_BENCH_TRACE="${RUNDIR}/amf_trace.csv" \
 AMF_PID=$!
 PIDS+=("$AMF_PID")
 echo "amf $AMF_PID" >> "${RUNDIR}/pids.txt"
-sleep 2
+
+# Wait for the NGAP listener specifically, not for a guessed number of seconds:
+# a gNB that dials before the socket exists just fails, and the run yields no
+# data at all for reasons that have nothing to do with the arm under test.
+ngap_ok=0
+for _ in $(seq 1 60); do
+  if grep -q "Listen on .*:${NGAP_PORT:-38412}" "${RUNDIR}/amf.log" 2>/dev/null; then
+    ngap_ok=1
+    break
+  fi
+  if ! kill -0 "$AMF_PID" 2>/dev/null; then break; fi
+  sleep 0.25
+done
+if [[ "$ngap_ok" -ne 1 ]]; then
+  echo "amf error: NGAP listener never came up; see ${RUNDIR}/amf.log" >&2
+  exit 7
+fi
 
 # Assert the AMF really built the pool we asked for. Config that parses but
 # does not take effect is the failure mode this benchmark cannot tolerate.
