@@ -14,3 +14,6 @@
 # Editor / OS noise
 *.swp
 .DS_Store
+
+# Python venv for analysis
+/.venv/
