@@ -1,0 +1,16 @@
+# Build artifacts (~75 MB of binaries)
+/bin/
+/free-ran-ue/build/
+/bench/provision/provision
+
+# Raw experiment output: large, regenerable, and grows with every run.
+# The parsed summaries under results/parsed/ ARE tracked - they are the
+# evidence behind the report.
+/results/raw/
+
+# Symlink into ~/free5gc
+/cert
+
+# Editor / OS noise
+*.swp
+.DS_Store

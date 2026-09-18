@@ -1,0 +1,110 @@
+package ue
+
+import (
+	"encoding/csv"
+	"os"
+	"strconv"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+// Benchmark instrumentation for amf-mt-bench (not upstream free-ran-ue).
+//
+// The stock logger prints whole seconds, which cannot express a per-UE
+// registration latency at all. Set RANUE_BENCH_TRACE=<path> to get one CSV row
+// per UE milestone with nanosecond timestamps, measured at the UE itself:
+//
+//	supi, event, ts_ns
+//
+// Events: reg_start, reg_done, pdu_start, pdu_done. The difference between a
+// UE's reg_start and pdu_done is the paper's "connection processing time".
+
+var (
+	benchEnabled atomic.Bool
+	benchCh      chan benchEvent
+	benchWG      sync.WaitGroup
+	benchOnce    sync.Once
+	benchDropped atomic.Uint64
+)
+
+type benchEvent struct {
+	supi  string
+	event string
+	ts    time.Time
+}
+
+// InitBenchTrace opens the trace file if RANUE_BENCH_TRACE is set.
+// Safe to call from every UE goroutine; only the first call has an effect.
+func InitBenchTrace() {
+	benchOnce.Do(func() {
+		path := os.Getenv("RANUE_BENCH_TRACE")
+		if path == "" {
+			return
+		}
+
+		f, err := os.Create(path)
+		if err != nil {
+			return
+		}
+
+		benchCh = make(chan benchEvent, 1<<16)
+		benchEnabled.Store(true)
+
+		benchWG.Add(1)
+		go func() {
+			defer benchWG.Done()
+			defer f.Close()
+
+			w := csv.NewWriter(f)
+			defer w.Flush()
+
+			_ = w.Write([]string{"supi", "event", "ts_ns"})
+			w.Flush()
+
+			// Flushed on a timer so a run killed by its timeout still leaves
+			// complete data behind.
+			flush := time.NewTicker(500 * time.Millisecond)
+			defer flush.Stop()
+
+			for {
+				select {
+				case e, ok := <-benchCh:
+					if !ok {
+						return
+					}
+					if err := w.Write([]string{
+						e.supi, e.event, strconv.FormatInt(e.ts.UnixNano(), 10),
+					}); err != nil {
+						return
+					}
+				case <-flush.C:
+					w.Flush()
+				}
+			}
+		}()
+	})
+}
+
+// StopBenchTrace flushes and closes the trace file.
+func StopBenchTrace() {
+	if !benchEnabled.CompareAndSwap(true, false) {
+		return
+	}
+	close(benchCh)
+	benchWG.Wait()
+}
+
+// BenchDropped reports rows lost to a full buffer; must be 0 for a valid run.
+func BenchDropped() uint64 { return benchDropped.Load() }
+
+func benchMark(supi, event string) {
+	if !benchEnabled.Load() {
+		return
+	}
+	select {
+	case benchCh <- benchEvent{supi: supi, event: event, ts: time.Now()}:
+	default:
+		benchDropped.Add(1)
+	}
+}
