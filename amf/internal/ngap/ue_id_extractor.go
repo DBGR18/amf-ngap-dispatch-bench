@@ -25,6 +25,15 @@ func ExtractUEIDWithMeta(msg []byte) (ueID uint64, procedureCode int64, found bo
 		return 0, -1, false
 	}
 
+	return ExtractUEIDFromPDU(pdu)
+}
+
+// ExtractUEIDFromPDU is ExtractUEIDWithMeta for a PDU that is already decoded.
+// The supi dispatch policy needs the decoded PDU for its own reasons, and
+// decoding a second time here would charge that policy for an ASN.1 decode the
+// mechanism does not actually require - which would show up as a difference
+// between the two arms that is an artifact of this code, not of the policies.
+func ExtractUEIDFromPDU(pdu *ngapType.NGAPPDU) (ueID uint64, procedureCode int64, found bool) {
 	if pdu == nil {
 		logger.NgapLog.Trace("NGAP PDU is nil")
 		return 0, -1, false

@@ -81,11 +81,28 @@ start_nf() {
 
 : > "${RUNDIR}/pids.txt"
 
-# A UPF that was SIGKILLed leaves its gtp5g link behind, and the next UPF dies
-# with "open link: create: file exists". Every UE in that run would then fail
-# PDU session establishment while registration still succeeded - a silent,
-# very plausible-looking bad result. Remove the stale link first.
+# Never inherit state from an aborted earlier run. A surviving UPF keeps
+# 2152 bound and a SIGKILLed one leaves its gtp5g link behind; either way the
+# next UPF dies, every UE then fails PDU session establishment while
+# registration still succeeds, and the result looks like an AMF finding.
+for pat in "${FREE5GC}/bin/" "${PROJ}/bin/amf-bench"; do
+  pkill -f "$pat" 2>/dev/null || true
+done
+sleep 1
+for pat in "${FREE5GC}/bin/" "${PROJ}/bin/amf-bench"; do
+  pkill -9 -f "$pat" 2>/dev/null || true
+done
+sleep 1
 ip link del upfgtp 2>/dev/null || true
+
+for port in 2152 38412; do
+  if ss -Hlnu "sport = :${port}" 2>/dev/null | grep -q . || \
+     ss -Hln "sport = :${port}" 2>/dev/null | grep -q .; then
+    echo "port ${port} is still bound by a leftover process:" >&2
+    ss -lnp "sport = :${port}" >&2 || true
+    exit 6
+  fi
+done
 
 start_nf upf "${FREE5GC}/bin/upf" "${PROJ}/config/upfcfg.yaml"
 start_nf nrf "${FREE5GC}/bin/nrf" "${PROJ}/config/nrfcfg.yaml"

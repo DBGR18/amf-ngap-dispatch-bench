@@ -41,6 +41,14 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# A gNB or UE surviving an aborted run keeps the namespace's SCTP address and
+# tunnel devices, and the new gNB then cannot bind. Clear them first.
+pkill -f 'free-ran-ue (gnb|ue) ' 2>/dev/null || true
+pkill -f './build/free-ran-ue' 2>/dev/null || true
+sleep 1
+pkill -9 -f './build/free-ran-ue' 2>/dev/null || true
+sleep 1
+
 ip netns exec "$RAN_NS" taskset -c "$RAN_CPUS" \
   ./build/free-ran-ue gnb -c config/gnb.yaml > "${RUNDIR}/gnb.log" 2>&1 &
 GNB_PID=$!

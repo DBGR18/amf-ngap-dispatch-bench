@@ -75,8 +75,9 @@ func SupiDispatchKey(msg []byte) (key uint64, procedureCode int64, found bool, f
 	}
 
 	// Not an InitialUEMessage: the subscriber identity is not in this message,
-	// so recover it from what the first one taught us.
-	ueID, _, ok := ExtractUEIDWithMeta(msg)
+	// so recover it from what the first one taught us. Reuse the PDU decoded
+	// above - decoding again would charge this policy for work it does not do.
+	ueID, _, ok := ExtractUEIDFromPDU(pdu)
 	if !ok {
 		return 0, procedureCode, false, false
 	}
