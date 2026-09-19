@@ -24,6 +24,21 @@ SETTLE="${SETTLE:-5}"   # seconds between teardown and the next start
 
 if [[ $EUID -ne 0 ]]; then echo "must run as root" >&2; exit 2; fi
 
+# Only one orchestrator may run on this machine. Two of them share the ports,
+# the network namespace and the MongoDB, and - worse - each run's pre-flight
+# cleanup kills the other's in-flight simulator, so every cell reports 0/N
+# while each orchestrator looks healthy on its own. A whole matrix was lost to
+# this. The lock is machine-wide, not per results directory, because the
+# conflict is over machine resources.
+LOCKFILE="/tmp/amf-mt-bench.orchestrator.lock"
+exec 9>"$LOCKFILE"
+if ! flock -n 9; then
+  echo "another run_all.sh already holds ${LOCKFILE}:" >&2
+  ps -eo pid,lstart,cmd | grep '[r]un_all\.sh' >&2 || true
+  echo "stop it first (sudo ./bench/stop_all.sh)" >&2
+  exit 2
+fi
+
 cd "$PROJ"
 mkdir -p "$RESULTS_ROOT"
 MANIFEST="${RESULTS_ROOT}/manifest.csv"
