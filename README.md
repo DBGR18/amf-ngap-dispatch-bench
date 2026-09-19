@@ -18,7 +18,12 @@ differs is **how the dispatch key is computed** for each message.
 
 ## Configuration
 
-Three keys under `configuration:` in `amfcfg.yaml`:
+A ready-to-use file is [`config/amfcfg.yaml`](config/amfcfg.yaml): free5gc
+v4.2.3's stock `amfcfg.yaml` (loopback addresses, certificate paths relative to
+the working directory, so it drops into a free5gc tree) with one added setting.
+Adjust the addresses for any other deployment.
+
+Three keys under `configuration:`:
 
 ```yaml
 configuration:
@@ -146,8 +151,13 @@ go test ./internal/ngap/ ./pkg/factory/
 ```
 
 The binary is a drop-in replacement for the AMF of a free5gc v4.2.3 deployment
-(same base commit, below): run it with your usual `amfcfg.yaml`, with the rest of
-the core (NRF, SMF, …) as normal.
+(same base commit, below): start it from your free5gc directory, with
+`config/amfcfg.yaml` or your own `amfcfg.yaml`, and the rest of the core
+(NRF, SMF, …) as normal:
+
+```bash
+./bin/amf -c config/amfcfg.yaml
+```
 
 **Optional per-message timing.** Set `AMF_BENCH_TRACE=/path/trace.csv` and the
 AMF writes one CSV row per inbound NGAP message:
@@ -187,3 +197,7 @@ Changes relative to that commit:
 | `pkg/service/init.go` | apply the mode before the pool starts; trace start and stop |
 
 With `ngapSchedulerMode` unset or `blog`, the AMF behaves as upstream does.
+
+The sample config, `config/amfcfg.yaml`, is not part of `amf/` (upstream's AMF
+repository ships none). It is free5gc v4.2.3's own `config/amfcfg.yaml` with the
+`ngapSchedulerMode` setting added and nothing else changed.

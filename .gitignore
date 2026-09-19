@@ -2,15 +2,19 @@
 /bin/
 
 # The experiment side of the project stays local for now: the load-generation
-# and measurement harness, its analysis, its configs, the simulator it drives,
-# the notes, and all output. Only the AMF implementation (amf/) and this README
-# are published.
+# and measurement harness, its analysis, the simulator it drives, the notes, and
+# all output. Published: the AMF implementation (amf/), the sample AMF config
+# (config/amfcfg.yaml) and this README.
 /bench/
 /analysis/
 /docs/
-/config/
 /free-ran-ue/
 /results/
+
+# config/ also holds the private testbed's configs (its addresses, its NF set),
+# so it is ignored except for the one sample that is published.
+/config/*
+!/config/amfcfg.yaml
 
 # Symlink into ~/free5gc
 /cert
