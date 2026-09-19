@@ -117,30 +117,12 @@ identity-keyed dispatch in `amf/internal/ngap/paper_dispatch.go`:
 3. **Pick the worker.** `key % N`. Because the key never changes, all of a UE's
    messages from registration onward reach one worker, in order.
 
-**Fallback.** If the subscriber identity cannot be read from a UE's first
-message — a re-registration by 5G-GUTI has no SUCI, or the SUCI uses profile A/B
-so the MSIN is encrypted — that UE is keyed on its RAN-UE-NGAP-ID instead, and
-the same key is used for all of its later messages. It is still stable for the
-UE's lifetime, but it is no longer the subscriber identity, and it is not
-`blog`'s key either (which switches to the AMF-UE-NGAP-ID partway through). If a
-later message's key cannot be resolved at all, that one message is dispatched on
-its AMF-UE-NGAP-ID.
 
 **Not implemented.** The paper additionally splits UEs into two priority
 classes by IMSI parity (even IMSI to threads `0..N-2`, odd IMSI confined to
 thread `N-1`). That prioritisation is **not** here; only the identity-keyed
 dispatch is.
 
-Known limitations of this implementation:
-
-- It needs null-scheme SUCIs; with profile A/B every UE is keyed on its
-  RAN-UE-NGAP-ID rather than its subscriber identity (see Fallback).
-- The key caches are never evicted when a UE is released, so memory grows with
-  the number of distinct UEs seen. Fine for short runs; it needs a cleanup hook
-  before long-running use.
-- Load balance across workers follows the MSIN distribution. Contiguous MSINs
-  spread perfectly evenly; real subscriber numbering may not.
-- It is a research prototype, not production code.
 
 ## Build, test, run
 
@@ -170,7 +152,7 @@ worker_id, key, procedure_code, fallback
 so time spent before dispatch (`submitted - recv`), waiting in the queue
 (`worker_start - submitted`) and being handled (`handled - worker_start`) can be
 separated. With the variable unset it does nothing beyond one atomic load per
-hook.
+message and a nil check at each hook.
 
 ## What differs from upstream
 
