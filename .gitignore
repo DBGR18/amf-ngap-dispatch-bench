@@ -3,10 +3,13 @@
 /free-ran-ue/build/
 /bench/provision/provision
 
-# Raw experiment output: large, regenerable, and grows with every run.
-# The parsed summaries under results/parsed/ ARE tracked - they are the
-# evidence behind the report.
-/results/raw/
+# Experiment output stays local: raw artifacts, parsed summaries, generated
+# tables and figures, and the written results. The repository publishes the
+# harness, not the findings.
+/results/
+/analysis/figures/
+/docs/results.md
+/docs/results_generated.md
 
 # Symlink into ~/free5gc
 /cert
