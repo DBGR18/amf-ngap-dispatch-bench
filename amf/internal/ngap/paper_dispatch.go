@@ -7,8 +7,8 @@ import (
 	amf_context "github.com/free5gc/amf/internal/context"
 	"github.com/free5gc/amf/internal/logger"
 	"github.com/free5gc/nas"
-	"github.com/free5gc/nas/nasMessage"
 	nasConvert "github.com/free5gc/nas/nasConvert"
+	"github.com/free5gc/nas/nasMessage"
 	"github.com/free5gc/ngap"
 	"github.com/free5gc/ngap/ngapType"
 )
@@ -17,7 +17,7 @@ import (
 // IMSI-parity prioritisation removed so that only the mechanism differs from
 // upstream:
 //
-//	upstream: key = NGAP UE ID, known as soon as the NGAP PDU is decoded.
+//	blog:     key = NGAP UE ID, known as soon as the NGAP PDU is decoded.
 //	          The key changes from RAN-UE-NGAP-ID to AMF-UE-NGAP-ID partway
 //	          through registration, so a UE can move between workers.
 //	paper:    key = the subscriber identity carried in the NAS Registration
@@ -28,26 +28,26 @@ import (
 // shared, so a measured difference between the two arms is attributable to the
 // dispatch decision and nothing else.
 
-// supiKeyCache remembers the subscriber-derived key for both NGAP identifiers,
+// paperKeyCache remembers the subscriber-derived key for both NGAP identifiers,
 // so later messages (which carry only AMF-UE-NGAP-ID) reach the same worker
 // without re-decoding NAS.
 var (
-	supiKeyByRanUeID sync.Map // int64 -> uint64
-	supiKeyByAmfUeID sync.Map // int64 -> uint64
+	paperKeyByRanUeID sync.Map // int64 -> uint64
+	paperKeyByAmfUeID sync.Map // int64 -> uint64
 )
 
-// ResetSupiKeyCache drops all remembered keys. Test helper.
-func ResetSupiKeyCache() {
-	supiKeyByRanUeID = sync.Map{}
-	supiKeyByAmfUeID = sync.Map{}
+// ResetPaperKeyCache drops all remembered keys. Test helper.
+func ResetPaperKeyCache() {
+	paperKeyByRanUeID = sync.Map{}
+	paperKeyByAmfUeID = sync.Map{}
 }
 
-// SupiDispatchKey computes the dispatch key for one raw NGAP message under the
-// supi policy. fallback reports that the subscriber identity could not be
+// PaperDispatchKey computes the dispatch key for one raw NGAP message under the
+// paper policy. fallback reports that the subscriber identity could not be
 // established and the NGAP UE ID was used instead; the benchmark must report
 // the fallback rate, because a high one would mean the two arms were not
 // actually running different policies.
-func SupiDispatchKey(msg []byte) (key uint64, procedureCode int64, found bool, fallback bool) {
+func PaperDispatchKey(msg []byte) (key uint64, procedureCode int64, found bool, fallback bool) {
 	pdu, err := ngap.Decoder(msg)
 	if err != nil || pdu == nil {
 		return 0, -1, false, false
@@ -81,11 +81,11 @@ func SupiDispatchKey(msg []byte) (key uint64, procedureCode int64, found bool, f
 	if !ok {
 		return 0, procedureCode, false, false
 	}
-	if k, hit := lookupSupiKey(int64(ueID)); hit {
+	if k, hit := lookupPaperKey(int64(ueID)); hit {
 		return k, procedureCode, true, false
 	}
 
-	logger.NgapLog.Tracef("supi dispatch: no subscriber key for UE ID %d, falling back to hash", ueID)
+	logger.NgapLog.Tracef("paper dispatch: no subscriber key for UE ID %d, falling back to the blog key", ueID)
 	return ueID, procedureCode, true, true
 }
 
@@ -121,11 +121,11 @@ func keyFromInitialUEMessage(msg *ngapType.InitiatingMessage) (uint64, int64, bo
 	if !ok {
 		// A re-registration by 5G-GUTI carries no SUCI. Upstream's key is all
 		// we have, so use it and count the fallback.
-		supiKeyByRanUeID.Store(ranUeNgapID, uint64(ranUeNgapID))
+		paperKeyByRanUeID.Store(ranUeNgapID, uint64(ranUeNgapID))
 		return uint64(ranUeNgapID), pc, true, true
 	}
 
-	supiKeyByRanUeID.Store(ranUeNgapID, key)
+	paperKeyByRanUeID.Store(ranUeNgapID, key)
 	return key, pc, true, false
 }
 
@@ -188,10 +188,10 @@ func msinKey(suci string) (uint64, bool) {
 	return key, true
 }
 
-// lookupSupiKey resolves an AMF-UE-NGAP-ID to the key learned at registration,
+// lookupPaperKey resolves an AMF-UE-NGAP-ID to the key learned at registration,
 // linking the two identifiers through the AMF context when needed.
-func lookupSupiKey(amfUeNgapID int64) (uint64, bool) {
-	if k, ok := supiKeyByAmfUeID.Load(amfUeNgapID); ok {
+func lookupPaperKey(amfUeNgapID int64) (uint64, bool) {
+	if k, ok := paperKeyByAmfUeID.Load(amfUeNgapID); ok {
 		return k.(uint64), true
 	}
 
@@ -200,11 +200,11 @@ func lookupSupiKey(amfUeNgapID int64) (uint64, bool) {
 	if ranUe == nil {
 		return 0, false
 	}
-	k, ok := supiKeyByRanUeID.Load(ranUe.RanUeNgapId)
+	k, ok := paperKeyByRanUeID.Load(ranUe.RanUeNgapId)
 	if !ok {
 		return 0, false
 	}
 
-	supiKeyByAmfUeID.Store(amfUeNgapID, k)
+	paperKeyByAmfUeID.Store(amfUeNgapID, k)
 	return k.(uint64), true
 }

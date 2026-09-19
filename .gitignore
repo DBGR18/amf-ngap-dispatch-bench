@@ -1,22 +1,25 @@
-# Build artifacts (~75 MB of binaries)
+# Build artifacts
 /bin/
-/free-ran-ue/build/
-/bench/provision/provision
 
-# Experiment output stays local: raw artifacts, parsed summaries, generated
-# tables and figures, and the written results. The repository publishes the
-# harness, not the findings.
+# The experiment side of the project stays local for now: the load-generation
+# and measurement harness, its analysis, its configs, the simulator it drives,
+# the notes, and all output. Only the AMF implementation (amf/) and this README
+# are published.
+/bench/
+/analysis/
+/docs/
+/config/
+/free-ran-ue/
 /results/
-/analysis/figures/
-/docs/results.md
-/docs/results_generated.md
 
 # Symlink into ~/free5gc
 /cert
 
+# Python
+/.venv/
+__pycache__/
+*.pyc
+
 # Editor / OS noise
 *.swp
 .DS_Store
-
-# Python venv for analysis
-/.venv/

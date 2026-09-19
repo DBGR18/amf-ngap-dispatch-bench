@@ -131,62 +131,62 @@ func suciMobileIdentity(msin string) []byte {
 	return buf
 }
 
-func TestSupiDispatchKey_InitialUEMessageUsesSubscriberIdentity(t *testing.T) {
-	ResetSupiKeyCache()
+func TestPaperDispatchKey_InitialUEMessageUsesSubscriberIdentity(t *testing.T) {
+	ResetPaperKeyCache()
 
 	// Two UEs whose RAN-UE-NGAP-IDs would hash differently from their MSINs.
 	msg := buildInitialUEMessage(t, 9999, suciMobileIdentity("0000000042"))
 
-	key, pc, found, fallback := SupiDispatchKey(msg)
+	key, pc, found, fallback := PaperDispatchKey(msg)
 	require.True(t, found, "dispatch key should be found")
 	assert.False(t, fallback, "a null-scheme SUCI must not fall back")
 	assert.Equal(t, int64(ngapType.ProcedureCodeInitialUEMessage), pc)
 	assert.Equal(t, uint64(42), key, "key should be the MSIN, not the RAN-UE-NGAP-ID")
 }
 
-func TestSupiDispatchKey_GutiRegistrationFallsBack(t *testing.T) {
-	ResetSupiKeyCache()
+func TestPaperDispatchKey_GutiRegistrationFallsBack(t *testing.T) {
+	ResetPaperKeyCache()
 
 	// 5G-GUTI mobile identity: no subscriber identity available this early.
 	guti := []byte{nasMessage.MobileIdentity5GSType5gGuti, 0x02, 0x08, 0x39, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01}
 	msg := buildInitialUEMessage(t, 7777, guti)
 
-	key, _, found, fallback := SupiDispatchKey(msg)
+	key, _, found, fallback := PaperDispatchKey(msg)
 	require.True(t, found)
 	assert.True(t, fallback, "a GUTI registration has no SUCI and must fall back")
 	assert.Equal(t, uint64(7777), key, "fallback key is the upstream NGAP UE ID")
 }
 
-func TestSupiDispatchKey_StableAcrossIdentifierChange(t *testing.T) {
-	ResetSupiKeyCache()
+func TestPaperDispatchKey_StableAcrossIdentifierChange(t *testing.T) {
+	ResetPaperKeyCache()
 
 	// Registration teaches the cache that RAN-UE-NGAP-ID 5 is subscriber 42.
 	msg := buildInitialUEMessage(t, 5, suciMobileIdentity("0000000042"))
-	first, _, found, _ := SupiDispatchKey(msg)
+	first, _, found, _ := PaperDispatchKey(msg)
 	require.True(t, found)
 	require.Equal(t, uint64(42), first)
 
 	// The same message seen again must resolve identically: the whole point of
 	// the policy is that a UE's key never moves.
-	second, _, found, fallback := SupiDispatchKey(msg)
+	second, _, found, fallback := PaperDispatchKey(msg)
 	require.True(t, found)
 	assert.False(t, fallback)
 	assert.Equal(t, first, second)
 }
 
 func TestSchedulerModeSelection(t *testing.T) {
-	SetSchedulerMode("supi")
-	assert.Equal(t, "supi", SchedulerMode())
+	SetSchedulerMode("paper")
+	assert.Equal(t, "paper", SchedulerMode())
 
-	SetSchedulerMode("hash")
-	assert.Equal(t, "hash", SchedulerMode())
+	SetSchedulerMode("blog")
+	assert.Equal(t, "blog", SchedulerMode())
 
 	// Anything unrecognised must not silently become the experimental policy.
 	SetSchedulerMode("nonsense")
-	assert.Equal(t, "hash", SchedulerMode())
+	assert.Equal(t, "blog", SchedulerMode())
 
 	SetSchedulerMode("")
-	assert.Equal(t, "hash", SchedulerMode())
+	assert.Equal(t, "blog", SchedulerMode())
 }
 
 func TestDispatchIsDeterministicPerKey(t *testing.T) {

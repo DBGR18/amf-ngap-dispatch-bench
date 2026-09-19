@@ -142,15 +142,15 @@ func NewUEScheduler(numWorkers int, taskBufferSize int, handler func(conn net.Co
 
 // schedulerMode selects the dispatch policy under test. It is written once at
 // startup, before any worker exists, and only read afterwards.
-var schedulerMode = factory.NgapSchedulerModeHash
+var schedulerMode = factory.NgapSchedulerModeBlog
 
 // SetSchedulerMode picks the dispatch policy. Call before InitScheduler.
 func SetSchedulerMode(mode string) {
-	if mode == factory.NgapSchedulerModeSupi {
-		schedulerMode = factory.NgapSchedulerModeSupi
+	if mode == factory.NgapSchedulerModePaper {
+		schedulerMode = factory.NgapSchedulerModePaper
 		return
 	}
-	schedulerMode = factory.NgapSchedulerModeHash
+	schedulerMode = factory.NgapSchedulerModeBlog
 }
 
 // SchedulerMode reports the active dispatch policy.

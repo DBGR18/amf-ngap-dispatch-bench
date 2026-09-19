@@ -37,7 +37,7 @@ type MsgTrace struct {
 	WorkerID      int
 	Key           uint64
 	ProcedureCode int64
-	Fallback      bool // supi mode only: key came from the hash fallback path
+	Fallback      bool // paper mode only: key came from the blog fallback path
 }
 
 var (

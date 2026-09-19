@@ -48,8 +48,8 @@ const (
 	AmfMbsBCResUriPrefix         = "/namf-mbs-bc/v1"
 
 	// NGAP worker-pool dispatch policies (amf-mt-bench).
-	NgapSchedulerModeHash = "hash" // upstream: key on NGAP UE ID, before NAS decoding
-	NgapSchedulerModeSupi = "supi" // paper-style: key on subscriber identity, after it
+	NgapSchedulerModeBlog  = "blog"  // blog: key on NGAP UE ID, before NAS decoding
+	NgapSchedulerModePaper = "paper" // paper: key on subscriber identity, after it
 )
 
 type Config struct {
@@ -113,7 +113,7 @@ type Configuration struct {
 	DefaultUECtxReq        bool              `yaml:"defaultUECtxReq,omitempty" valid:"type(bool),optional"`
 	NgapWorkerPoolSize     int               `yaml:"ngapWorkerPoolSize,omitempty" valid:"type(int),optional"`
 	NgapTaskBufferSize     int               `yaml:"ngapTaskBufferSize,omitempty" valid:"type(int),optional"`
-	NgapSchedulerMode      string            `yaml:"ngapSchedulerMode,omitempty" valid:"in(hash|supi),optional"`
+	NgapSchedulerMode      string            `yaml:"ngapSchedulerMode,omitempty" valid:"in(blog|paper),optional"`
 }
 
 type Logger struct {
@@ -1060,8 +1060,8 @@ func (c *Config) GetNgapTaskBufferSize() int {
 }
 
 // GetNgapSchedulerMode reports which NGAP dispatch policy the worker pool uses:
-// "hash" (upstream: key on the NGAP UE ID, decided before NAS decoding) or
-// "supi" (paper-style: key on the subscriber identity, decided after it).
+// "blog" (free5gc: key on the NGAP UE ID, decided before NAS decoding) or
+// "paper" (key on the subscriber identity, decided after it).
 // Empty config means upstream behaviour.
 func (c *Config) GetNgapSchedulerMode() string {
 	c.RLock()
@@ -1069,5 +1069,5 @@ func (c *Config) GetNgapSchedulerMode() string {
 	if c.Configuration != nil && c.Configuration.NgapSchedulerMode != "" {
 		return c.Configuration.NgapSchedulerMode
 	}
-	return NgapSchedulerModeHash
+	return NgapSchedulerModeBlog
 }
