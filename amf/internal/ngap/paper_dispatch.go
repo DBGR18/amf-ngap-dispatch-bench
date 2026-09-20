@@ -1,6 +1,7 @@
 package ngap
 
 import (
+	"net"
 	"strings"
 	"sync"
 
@@ -28,11 +29,26 @@ import (
 // shared, so a measured difference between the two arms is attributable to the
 // dispatch decision and nothing else.
 
+// paperRanKey scopes a RAN-UE-NGAP-ID to the gNB that issued it.
+//
+// A RAN-UE-NGAP-ID is only unique within one NG connection - free5gc keeps
+// them in a per-gNB AmfRan.RanUeList, while AMF-UE-NGAP-IDs live in the
+// AMF-wide RanUePool. Keying on the bare int64 therefore works with a single
+// gNB and silently breaks with two: the later gNB's entry overwrites the
+// earlier one, and the first gNB's UE then resolves to the other UE's key,
+// scattering its messages across workers - exactly what this policy exists to
+// prevent. free5gc itself keys AmfRanPool by net.Conn, so a connection is a
+// safe and cheap stand-in for the gNB's identity here.
+type paperRanKey struct {
+	conn net.Conn
+	id   int64
+}
+
 // paperKeyCache remembers the subscriber-derived key for both NGAP identifiers,
 // so later messages (which carry only AMF-UE-NGAP-ID) reach the same worker
 // without re-decoding NAS.
 var (
-	paperKeyByRanUeID sync.Map // int64 -> uint64
+	paperKeyByRanUeID sync.Map // paperRanKey -> uint64
 	paperKeyByAmfUeID sync.Map // int64 -> uint64
 )
 
@@ -47,7 +63,7 @@ func ResetPaperKeyCache() {
 // established and the NGAP UE ID was used instead; the benchmark must report
 // the fallback rate, because a high one would mean the two arms were not
 // actually running different policies.
-func PaperDispatchKey(msg []byte) (key uint64, procedureCode int64, found bool, fallback bool) {
+func PaperDispatchKey(conn net.Conn, msg []byte) (key uint64, procedureCode int64, found bool, fallback bool) {
 	pdu, err := ngap.Decoder(msg)
 	if err != nil || pdu == nil {
 		return 0, -1, false, false
@@ -60,7 +76,7 @@ func PaperDispatchKey(msg []byte) (key uint64, procedureCode int64, found bool, 
 		}
 		procedureCode = pdu.InitiatingMessage.ProcedureCode.Value
 		if procedureCode == ngapType.ProcedureCodeInitialUEMessage {
-			return keyFromInitialUEMessage(pdu.InitiatingMessage)
+			return keyFromInitialUEMessage(conn, pdu.InitiatingMessage)
 		}
 	case ngapType.NGAPPDUPresentSuccessfulOutcome:
 		if pdu.SuccessfulOutcome != nil {
@@ -91,7 +107,7 @@ func PaperDispatchKey(msg []byte) (key uint64, procedureCode int64, found bool, 
 
 // keyFromInitialUEMessage decodes the NAS Registration Request far enough to
 // read the subscriber identity, and remembers it under the RAN-UE-NGAP-ID.
-func keyFromInitialUEMessage(msg *ngapType.InitiatingMessage) (uint64, int64, bool, bool) {
+func keyFromInitialUEMessage(conn net.Conn, msg *ngapType.InitiatingMessage) (uint64, int64, bool, bool) {
 	const pc = ngapType.ProcedureCodeInitialUEMessage
 
 	if msg.Value.InitialUEMessage == nil {
@@ -121,11 +137,11 @@ func keyFromInitialUEMessage(msg *ngapType.InitiatingMessage) (uint64, int64, bo
 	if !ok {
 		// A re-registration by 5G-GUTI carries no SUCI. Upstream's key is all
 		// we have, so use it and count the fallback.
-		paperKeyByRanUeID.Store(ranUeNgapID, uint64(ranUeNgapID))
+		paperKeyByRanUeID.Store(paperRanKey{conn, ranUeNgapID}, uint64(ranUeNgapID))
 		return uint64(ranUeNgapID), pc, true, true
 	}
 
-	paperKeyByRanUeID.Store(ranUeNgapID, key)
+	paperKeyByRanUeID.Store(paperRanKey{conn, ranUeNgapID}, key)
 	return key, pc, true, false
 }
 
@@ -213,10 +229,15 @@ func lookupPaperKey(amfUeNgapID int64) (uint64, bool) {
 
 	// First message under the new identifier: bridge from RAN-UE-NGAP-ID.
 	ranUe := amf_context.GetSelf().RanUeFindByAmfUeNgapID(amfUeNgapID)
-	if ranUe == nil {
+	if ranUe == nil || ranUe.Ran == nil {
 		return 0, false
 	}
-	k, ok := paperKeyByRanUeID.Load(ranUe.RanUeNgapId)
+	// ranUe.Ran.Conn is the connection the registration arrived on. A handover
+	// (RanUe.SwitchToRan) replaces both of these, so a UE handed over before
+	// its first post-registration message misses here and falls back; from
+	// then on the AMF-UE-NGAP-ID cache below answers and handovers no longer
+	// matter.
+	k, ok := paperKeyByRanUeID.Load(paperRanKey{ranUe.Ran.Conn, ranUe.RanUeNgapId})
 	if !ok {
 		return 0, false
 	}

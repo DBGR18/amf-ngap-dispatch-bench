@@ -271,7 +271,7 @@ func dispatchToWorkerPool(conn net.Conn, msg []byte, handler NGAPHandler) {
 		fallback      bool
 	)
 	if ngap_internal.SchedulerMode() == factory.NgapSchedulerModePaper {
-		ueID, procedureCode, found, fallback = ngap_internal.PaperDispatchKey(msg)
+		ueID, procedureCode, found, fallback = ngap_internal.PaperDispatchKey(conn, msg)
 	} else {
 		ueID, procedureCode, found = ngap_internal.ExtractUEIDWithMeta(msg)
 	}

@@ -2,6 +2,7 @@ package ngap
 
 import (
 	"bytes"
+	"net"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -12,6 +13,8 @@ import (
 	"github.com/free5gc/nas/nasType"
 	"github.com/free5gc/ngap"
 	"github.com/free5gc/ngap/ngapType"
+
+	ngap_testing "github.com/free5gc/amf/internal/ngap/testing"
 )
 
 func TestImsiKey(t *testing.T) {
@@ -143,11 +146,12 @@ func suciMobileIdentity(msin string) []byte {
 
 func TestPaperDispatchKey_InitialUEMessageUsesSubscriberIdentity(t *testing.T) {
 	ResetPaperKeyCache()
+	connA := &ngap_testing.SctpConnStub{}
 
 	// A UE whose RAN-UE-NGAP-ID would hash differently from its IMSI.
 	msg := buildInitialUEMessage(t, 9999, suciMobileIdentity("0000000042"))
 
-	key, pc, found, fallback := PaperDispatchKey(msg)
+	key, pc, found, fallback := PaperDispatchKey(connA, msg)
 	require.True(t, found, "dispatch key should be found")
 	assert.False(t, fallback, "a null-scheme SUCI must not fall back")
 	assert.Equal(t, int64(ngapType.ProcedureCodeInitialUEMessage), pc)
@@ -157,12 +161,13 @@ func TestPaperDispatchKey_InitialUEMessageUsesSubscriberIdentity(t *testing.T) {
 
 func TestPaperDispatchKey_GutiRegistrationFallsBack(t *testing.T) {
 	ResetPaperKeyCache()
+	connA := &ngap_testing.SctpConnStub{}
 
 	// 5G-GUTI mobile identity: no subscriber identity available this early.
 	guti := []byte{nasMessage.MobileIdentity5GSType5gGuti, 0x02, 0x08, 0x39, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01}
 	msg := buildInitialUEMessage(t, 7777, guti)
 
-	key, _, found, fallback := PaperDispatchKey(msg)
+	key, _, found, fallback := PaperDispatchKey(connA, msg)
 	require.True(t, found)
 	assert.True(t, fallback, "a GUTI registration has no SUCI and must fall back")
 	assert.Equal(t, uint64(7777), key, "fallback key is the upstream NGAP UE ID")
@@ -170,19 +175,57 @@ func TestPaperDispatchKey_GutiRegistrationFallsBack(t *testing.T) {
 
 func TestPaperDispatchKey_StableAcrossIdentifierChange(t *testing.T) {
 	ResetPaperKeyCache()
+	connA := &ngap_testing.SctpConnStub{}
 
 	// Registration teaches the cache that RAN-UE-NGAP-ID 5 is this subscriber.
 	msg := buildInitialUEMessage(t, 5, suciMobileIdentity("0000000042"))
-	first, _, found, _ := PaperDispatchKey(msg)
+	first, _, found, _ := PaperDispatchKey(connA, msg)
 	require.True(t, found)
 	require.Equal(t, uint64(208930000000042), first)
 
 	// The same message seen again must resolve identically: the whole point of
 	// the policy is that a UE's key never moves.
-	second, _, found, fallback := PaperDispatchKey(msg)
+	second, _, found, fallback := PaperDispatchKey(connA, msg)
 	require.True(t, found)
 	assert.False(t, fallback)
 	assert.Equal(t, first, second)
+}
+
+// Two gNBs may each hand out the same RAN-UE-NGAP-ID: it is only unique within
+// one NG connection. Before the key was scoped to the connection, the second
+// registration overwrote the first, and the first UE's later messages then
+// resolved to the second UE's key.
+func TestPaperDispatchKey_SameRanUeIdOnTwoGnbs(t *testing.T) {
+	ResetPaperKeyCache()
+
+	connA := &ngap_testing.SctpConnStub{}
+	connB := &ngap_testing.SctpConnStub{}
+	const sharedRanUeID = 5
+
+	keyA, _, found, fallback := PaperDispatchKey(connA,
+		buildInitialUEMessage(t, sharedRanUeID, suciMobileIdentity("0000000042")))
+	require.True(t, found)
+	require.False(t, fallback)
+
+	keyB, _, found, fallback := PaperDispatchKey(connB,
+		buildInitialUEMessage(t, sharedRanUeID, suciMobileIdentity("0000000077")))
+	require.True(t, found)
+	require.False(t, fallback)
+
+	assert.Equal(t, uint64(208930000000042), keyA)
+	assert.Equal(t, uint64(208930000000077), keyB)
+	assert.NotEqual(t, keyA, keyB, "two subscribers must not share a dispatch key")
+
+	// Both entries must still be there: the second must not have replaced the
+	// first, which is what a bare RAN-UE-NGAP-ID key did.
+	for _, tc := range []struct {
+		conn net.Conn
+		want uint64
+	}{{connA, 208930000000042}, {connB, 208930000000077}} {
+		got, ok := paperKeyByRanUeID.Load(paperRanKey{tc.conn, sharedRanUeID})
+		require.True(t, ok, "entry for this gNB should survive the other gNB's registration")
+		assert.Equal(t, tc.want, got.(uint64))
+	}
 }
 
 func TestSchedulerModeSelection(t *testing.T) {
