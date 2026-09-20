@@ -14,26 +14,32 @@ import (
 	"github.com/free5gc/ngap/ngapType"
 )
 
-func TestMsinKey(t *testing.T) {
+func TestImsiKey(t *testing.T) {
 	tests := []struct {
 		name string
 		suci string
 		want uint64
 		ok   bool
 	}{
-		{"null scheme", "suci-0-208-93-0000-0-0-0000000001", 1, true},
-		{"null scheme high msin", "suci-0-208-93-0000-0-0-0000000399", 399, true},
+		// The key is the whole IMSI: MCC + MNC + MSIN.
+		{"null scheme", "suci-0-208-93-0000-0-0-0000000001", 208930000000001, true},
+		{"null scheme high msin", "suci-0-208-93-0000-0-0-0000000399", 208930000000399, true},
+		{"three digit mnc", "suci-0-310-260-0000-0-0-0000000001", 3102600000000001, true},
+		{"different plmn, same msin", "suci-0-001-01-0000-0-0-0000000001", 1010000000001, true},
 		// Profile A/B conceal the MSIN, so the paper's identity-based dispatch
 		// cannot work before authentication; the caller must fall back.
 		{"profile A", "suci-0-208-93-0000-1-0-abcdef0123", 0, false},
 		{"not a suci", "imsi-208930000000001", 0, false},
 		{"too few fields", "suci-0-208-93", 0, false},
 		{"non numeric msin", "suci-0-208-93-0000-0-0-00000000xx", 0, false},
+		{"non numeric mcc", "suci-0-2x8-93-0000-0-0-0000000001", 0, false},
+		// A NAI-format SUCI has no IMSI to key on.
+		{"supi format nai", "suci-1-208-93-0000-0-0-0000000001", 0, false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, ok := msinKey(tt.suci)
+			got, ok := imsiKey(tt.suci)
 			assert.Equal(t, tt.ok, ok)
 			if tt.ok {
 				assert.Equal(t, tt.want, got)
@@ -116,7 +122,11 @@ func suciMobileIdentity(msin string) []byte {
 
 	buf := []byte{
 		nasMessage.MobileIdentity5GSTypeSuci, // SUPI format IMSI, type SUCI
-		0x02, 0x08, 0x39,                     // MCC 208, MNC 93 (BCD, mnc digit3 = f)
+		// MCC 208, MNC 93. BCD, nibble-swapped per octet; the high nibble of
+		// the third octet is MNC digit 3, which must be 0xf for a 2-digit MNC.
+		// With 0x08 here the MNC decodes as "930" instead of "93" - harmless
+		// while only the MSIN was keyed on, wrong once the MCC and MNC are.
+		0x02, 0xf8, 0x39,
 		0x00, 0x00, // routing indicator
 		0x00, // protection scheme id: null scheme
 		0x00, // home network public key id
@@ -134,14 +144,15 @@ func suciMobileIdentity(msin string) []byte {
 func TestPaperDispatchKey_InitialUEMessageUsesSubscriberIdentity(t *testing.T) {
 	ResetPaperKeyCache()
 
-	// Two UEs whose RAN-UE-NGAP-IDs would hash differently from their MSINs.
+	// A UE whose RAN-UE-NGAP-ID would hash differently from its IMSI.
 	msg := buildInitialUEMessage(t, 9999, suciMobileIdentity("0000000042"))
 
 	key, pc, found, fallback := PaperDispatchKey(msg)
 	require.True(t, found, "dispatch key should be found")
 	assert.False(t, fallback, "a null-scheme SUCI must not fall back")
 	assert.Equal(t, int64(ngapType.ProcedureCodeInitialUEMessage), pc)
-	assert.Equal(t, uint64(42), key, "key should be the MSIN, not the RAN-UE-NGAP-ID")
+	assert.Equal(t, uint64(208930000000042), key,
+		"key should be the full IMSI (MCC+MNC+MSIN), not the RAN-UE-NGAP-ID")
 }
 
 func TestPaperDispatchKey_GutiRegistrationFallsBack(t *testing.T) {
@@ -160,11 +171,11 @@ func TestPaperDispatchKey_GutiRegistrationFallsBack(t *testing.T) {
 func TestPaperDispatchKey_StableAcrossIdentifierChange(t *testing.T) {
 	ResetPaperKeyCache()
 
-	// Registration teaches the cache that RAN-UE-NGAP-ID 5 is subscriber 42.
+	// Registration teaches the cache that RAN-UE-NGAP-ID 5 is this subscriber.
 	msg := buildInitialUEMessage(t, 5, suciMobileIdentity("0000000042"))
 	first, _, found, _ := PaperDispatchKey(msg)
 	require.True(t, found)
-	require.Equal(t, uint64(42), first)
+	require.Equal(t, uint64(208930000000042), first)
 
 	// The same message seen again must resolve identically: the whole point of
 	// the policy is that a UE's key never moves.

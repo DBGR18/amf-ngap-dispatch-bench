@@ -89,7 +89,7 @@ is created, and `dispatchToWorkerPool()` checks the mode on every message.
 
 |  | `blog` | `paper` |
 |---|---|---|
-| dispatch key | RAN-UE-NGAP-ID on the first message (InitialUEMessage), AMF-UE-NGAP-ID on every later one | the MSIN from the UE's SUCI, on every message |
+| dispatch key | RAN-UE-NGAP-ID on the first message (InitialUEMessage), AMF-UE-NGAP-ID on every later one | the UE's IMSI (MCC+MNC+MSIN), taken from its SUCI, on every message |
 | known after | the NGAP decode | the NAS decode (first message), or a lookup (later messages) |
 | extra work on the reader goroutine | none | a NAS decode on InitialUEMessage; a map lookup on every other UE message |
 | key stable for the UE's lifetime | no — it changes when the AMF assigns AMF-UE-NGAP-ID, so a UE's later messages can land on a different worker | yes — a UE's messages always go to the same worker queue |
@@ -105,10 +105,10 @@ identity-keyed dispatch in `amf/internal/ngap/paper_dispatch.go`:
    PDU out of the NGAP message. Decode the NAS Registration Request (plain NAS —
    there is no security context yet), require its mobile identity to be a SUCI,
    and turn it into a string such as `suci-0-208-93-0000-0-0-0000000001`
-   (`subscriberKeyFromNAS`). `msinKey` checks the protection scheme is `0`
-   (null-scheme, so the MSIN is not encrypted) and converts the MSIN digits to a
-   number. That number is the dispatch key, and it is remembered against the
-   RAN-UE-NGAP-ID.
+   (`subscriberKeyFromNAS`). `imsiKey` checks the protection scheme is `0`
+   (null-scheme, so the MSIN is not encrypted) and concatenates the MCC, MNC and
+   MSIN digits into the full IMSI, e.g. `208930000000001`. That number is the
+   dispatch key, and it is remembered against the RAN-UE-NGAP-ID.
 2. **Every later message.** These carry only the AMF-UE-NGAP-ID, not the
    subscriber identity. `lookupPaperKey` finds the key by AMF-UE-NGAP-ID in a
    `sync.Map`; on the first miss it bridges through the AMF context

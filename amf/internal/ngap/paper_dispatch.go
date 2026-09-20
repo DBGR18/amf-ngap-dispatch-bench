@@ -129,7 +129,7 @@ func keyFromInitialUEMessage(msg *ngapType.InitiatingMessage) (uint64, int64, bo
 	return key, pc, true, false
 }
 
-// subscriberKeyFromNAS pulls the MSIN out of the SUCI in a Registration
+// subscriberKeyFromNAS pulls the IMSI out of the SUCI in a Registration
 // Request. The initial Registration Request is not integrity protected, so it
 // decodes as plain NAS.
 func subscriberKeyFromNAS(payload []byte) (uint64, bool) {
@@ -160,30 +160,46 @@ func subscriberKeyFromNAS(payload []byte) (uint64, bool) {
 	if err != nil {
 		return 0, false
 	}
-	return msinKey(suci)
+	return imsiKey(suci)
 }
 
-// msinKey turns "suci-0-208-93-0000-0-0-0000000001" into 1.
+// imsiKey turns "suci-0-208-93-0000-0-0-0000000001" into 208930000000001, the
+// full IMSI: MCC + MNC + MSIN, as the paper keys on.
+//
+// nasConvert.SuciToStringWithError builds the string as
+//
+//	suci-0-<mcc>-<mnc>-<routing indicator>-<protection scheme>-<key id>-<scheme output>
+//
+// so the three IMSI parts are fields 2, 3 and 7. The MNC is two or three
+// digits, which is why they are concatenated as text rather than combined
+// arithmetically. A 15-digit IMSI is at most ~1e15 and fits a uint64 easily.
 //
 // Only a null-scheme SUCI (protection scheme 0) exposes the MSIN; with a
 // profile A/B SUCI the scheme output is ciphertext and the paper's
 // identity-based dispatch is not possible before authentication completes.
-func msinKey(suci string) (uint64, bool) {
+func imsiKey(suci string) (uint64, bool) {
 	parts := strings.Split(suci, "-")
-	if len(parts) < 8 || parts[0] != "suci" {
+	if len(parts) != 8 || parts[0] != "suci" {
+		return 0, false
+	}
+	if parts[1] != "0" { // SUPI format: 0 = IMSI. A NAI carries no IMSI.
 		return 0, false
 	}
 	if parts[5] != "0" { // protection scheme id
 		return 0, false
 	}
 
-	msin := parts[len(parts)-1]
 	var key uint64
-	for _, c := range msin {
-		if c < '0' || c > '9' {
+	for _, field := range []string{parts[2], parts[3], parts[7]} { // MCC, MNC, MSIN
+		if field == "" {
 			return 0, false
 		}
-		key = key*10 + uint64(c-'0')
+		for _, c := range field {
+			if c < '0' || c > '9' {
+				return 0, false
+			}
+			key = key*10 + uint64(c-'0')
+		}
 	}
 	return key, true
 }
