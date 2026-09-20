@@ -152,57 +152,44 @@ reader goroutine. See **Known consequences of `paper` mode** below.
 ## How the subscriber key is derived
 
 Both paper-derived modes key on the full IMSI (MCC+MNC+MSIN, e.g.
-`208930000000001`), but they obtain it differently, and the difference is forced
-by *where* each one decides.
+`208930000000001`), and `worker = key % N`. They obtain it differently, and the
+difference is forced by *where* each one decides.
 
-1. **First message.** The only one carrying the identity, and the only one with
-   no UE context yet, so it comes from the NAS payload: `paper-early` decodes
-   the Registration Request, `paper` reuses the decode
-   `handleInitialUEMessageMain` already does at `handler.go:468`. `imsiKey`
-   requires protection scheme `0` (null scheme, MSIN in the clear).
-2. **Later messages.** These carry only the AMF-UE-NGAP-ID.
-   - `paper-early` looks the key up in a cache populated at registration, keyed
-     by `{gNB connection, RAN-UE-NGAP-ID}` and bridged to the AMF-UE-NGAP-ID on
-     first use. It **must not** read the identity out of the AMF context here:
-     it decides on the SCTP reader goroutine while a worker may be inside the
-     same UE's previous message, and `AmfUe.Suci`/`AmfUe.Supi` are written from
-     there (`internal/gmm/handler.go:477`, `:1563`, `:2035`) — a data race,
-     confirmed with `-race` against a live registration load. The cache is
-     race-free by construction: it reads only fields fixed when the `RanUe` was
-     created.
-   - `paper` holds the `*RanUe` the handler has already resolved and reads
-     `AmfUe` directly, preferring `Suci` over `Supi` because `Supi` stays empty
-     until AUSF confirms authentication. That read is subject to the same race,
-     but `paper`'s hand-off point already puts a UE's NGAP half and NAS half on
-     two goroutines, so it adds no exposure the mode does not already have. See
-     **Known consequences** below.
-3. **Worker** = `key % N`.
+**The first message** is the only one carrying the identity and the only one
+with no UE context yet, so it comes from the NAS payload: `paper-early` decodes
+the Registration Request, `paper` reuses the decode `handleInitialUEMessageMain`
+already does at `handler.go:468`.
 
-**Fallback.** When no identity can be read the key is the RAN-UE-NGAP-ID, and
-`paper-early` caches that decision too — so a UE whose SUCI only arrives later
-(an unmatched 5G-GUTI, answered with an Identity Request) keeps the key it was
-first given instead of switching to an IMSI key and moving worker
-mid-registration. A RAN-UE-NGAP-ID is unique only within one gNB, which is why
-the cache is scoped to the connection: unscoped, a second gNB's registration
-would overwrite the first's entry and send that UE's later messages to the wrong
-worker.
+**Later messages** carry only the AMF-UE-NGAP-ID.
 
-**Requires the null scheme.** With a profile A/B SUCI the MSIN is ciphertext and
-nobody in the AMF holds the IMSI until AUSF/UDM de-conceals it, several SBI
-round-trips into `HandleNAS`. Such a UE falls back for its whole lifetime —
-`subscriberKeyFromAmfUe` deliberately refuses the SUPI while a concealed SUCI is
-present, since taking it would move the UE to another worker the instant
-authentication completed. Those runs are **not a valid paper arm**; the fallback
-rate is in the trace CSV, so check it.
+- `paper-early` looks the key up in a cache populated at registration, keyed by
+  `{gNB connection, RAN-UE-NGAP-ID}`. It **must not** read `AmfUe` here: it
+  decides on the reader goroutine while a worker may be inside the same UE's
+  previous message, and `Suci`/`Supi` are written from there
+  (`internal/gmm/handler.go:477`, `:1563`, `:2035`) — a data race, confirmed
+  with `-race`. The cache reads only fields fixed when the `RanUe` was created.
+- `paper` holds the `*RanUe` and reads `AmfUe` directly, `Suci` before `Supi`
+  since `Supi` stays empty until AUSF answers. Same race, but its hand-off point
+  already splits a UE across two goroutines — see **Known consequences**.
 
-**Where this goes beyond the paper.** The paper takes the IMSI from the Initial
-UE Message + Registration Request or the PDU Session Establishment Request, and
-does not describe how a UE's other messages — the majority of its traffic —
-obtain it. Step 2 above is this project's own design.
+**Fallback** is the RAN-UE-NGAP-ID, cached too, so a UE whose SUCI arrives late
+(an unmatched 5G-GUTI, answered with an Identity Request) keeps its first key
+instead of moving worker mid-registration. The cache is connection-scoped
+because a RAN-UE-NGAP-ID is unique only within one gNB.
 
-**Not implemented.** The paper also splits UEs into two priority classes by IMSI
-parity (even to threads `0..N-2`, odd confined to thread `N-1`). That
-prioritisation is **not** here; only the identity-keyed dispatch is.
+**Requires the null scheme.** A profile A/B SUCI conceals the MSIN, and nobody
+in the AMF holds the IMSI until AUSF/UDM de-conceals it. Such a UE falls back
+for its whole lifetime: `subscriberKeyFromAmfUe` refuses the SUPI while a
+concealed SUCI is present, since taking it would move the UE the instant
+authentication completed. Those runs are **not a valid paper arm** — check the
+fallback column.
+
+**Beyond the paper**: it takes the IMSI from the Initial UE Message +
+Registration Request or the PDU Session Establishment Request, and never says
+how a UE's other messages — most of its traffic — obtain it. The lookup above is
+this project's own design. **Not implemented**: the paper's IMSI-parity split
+(even to threads `0..N-2`, odd confined to `N-1`); only the identity-keyed
+dispatch is here.
 
 ## Known consequences of `paper` mode
 
