@@ -213,6 +213,18 @@ where the paper places it has three effects the paper's abstraction does not
 model. They are reported here rather than worked around, because working around
 them would mean no longer implementing the paper.
 
+They are measured, not predicted. A 100-UE registration storm against a `-race`
+build with four NGAP workers, two runs per mode:
+
+| mode | UEs completed | data races |
+|---|---|---|
+| `blog` | 100/100, 100/100 | 0, 0 |
+| `paper-early` | 100/100, 100/100 | 0, 0 |
+| `paper` | 100/100, 100/100 | **4, 2** |
+
+(A `-race` build's latencies are inflated several-fold and are not usable as
+results; these runs are for the race detector only.)
+
 1. **Blocking SBI calls sit in the serial section.** The N2 response handlers
    make synchronous HTTP calls to the SMF — `SendUpdateSmContextN2Info` at
    `internal/ngap/handler.go:980` and `:1006` (InitialContextSetupResponse),
@@ -226,6 +238,12 @@ them would mean no longer implementing the paper.
    diverge from `blog` as the UE count grows, and report the serial-section time
    from the trace rather than only the end-to-end figure.
 
+   In the runs above, 299 of 899 inbound NGAP messages — a third of the traffic
+   — were handled on the reader goroutine with no hand-off at all
+   (`worker_id = -1`): InitialContextSetupResponse (procedure code 14) ×100,
+   PDUSessionResourceSetupResponse (29) ×100, UEContextReleaseComplete (41)
+   ×98, NGSetup (21) ×1. `blog` and `paper-early` handed off every one of them.
+
 2. **A UE's NGAP half and NAS half run on different goroutines.** The reader may
    be inside message N+1's handler while a worker is still in message N's NAS
    processing for the same UE — routinely, since the AMF's
@@ -236,6 +254,24 @@ them would mean no longer implementing the paper.
    it except `handler.go:337`. `paper-early` does not have this problem: it
    hands the whole handler to one worker, and takes its dispatch key from a
    cache rather than from the shared `AmfUe`.
+
+   Every report from those runs has the same shape — the reader goroutine tears
+   a UE down while a NAS worker is still inside that UE's deregistration:
+
+   | written on the reader goroutine | read in a NAS worker |
+   |---|---|
+   | `AmfUe.NASLog` / `GmmLog`, `amf_ue.go:380` (`UpdateLogFields`, from `DetachRanUe`) | `internal/gmm/sm.go:27` |
+   | the `AmfUe.RanUe` map, `delete()` in `DetachRanUe` (`amf_ue.go:354`) | `AmfUe.ClearRegistrationRequestData` |
+
+   The write arrives by two paths, both on the reader goroutine:
+   `handleUEContextReleaseCompleteMain` (`handler.go:338`) and
+   `HandleSCTPNotification` → `AmfRan.Remove`. The second is not an NGAP
+   dispatch at all and runs on that goroutine in every mode; it only races here
+   because `paper` leaves the UE's NAS processing on another one.
+
+   The `AmfUe.RanUe` entry is the serious half: a concurrent map read and
+   delete can abort the process with `concurrent map read and map write`,
+   rather than merely yielding a stale value. No run has hit that yet.
 
 3. **A UE whose identity arrives late changes worker once.** `paper` reads the
    identity from the UE context at every hand-off, so a registration the AMF
