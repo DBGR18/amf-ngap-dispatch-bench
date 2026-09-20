@@ -201,7 +201,13 @@ func (a *AmfApp) Start() {
 	// very first message is already traced.
 	ngap.InitTrace()
 	ngap.SetSchedulerMode(schedulerMode)
-	ngap.InitScheduler(workerPoolSize, taskBufferSize, ngap.Dispatch)
+	if schedulerMode == factory.NgapSchedulerModePaper {
+		// Paper mode dispatches at the NAS boundary, so the NGAP-level pool is
+		// never used; starting it would only add idle goroutines.
+		ngap.InitNasScheduler(workerPoolSize, taskBufferSize)
+	} else {
+		ngap.InitScheduler(workerPoolSize, taskBufferSize, ngap.Dispatch)
+	}
 
 	ngapHandler := ngap_service.NGAPHandler{
 		HandleMessage:         ngap.Dispatch,
@@ -313,6 +319,7 @@ func (a *AmfApp) terminateProcedure() {
 	// Shutdown NGAP worker pool and scheduler
 	logger.MainLog.Infof("Shutting down NGAP worker pool and scheduler...")
 	ngap.ShutdownScheduler()
+	ngap.ShutdownNasScheduler()
 
 	// After the workers have drained, so no trace row is written post-close.
 	ngap.StopTrace()

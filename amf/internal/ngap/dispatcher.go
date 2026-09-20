@@ -33,6 +33,7 @@ func Dispatch(conn net.Conn, msg []byte) {
 		logger.NgapLog.Error("NGAP Message is nil")
 		return
 	}
+	noteSerialPDU(conn, pdu)
 
 	ran, ok := amfSelf.AmfRanFindByConn(conn)
 	if !ok {

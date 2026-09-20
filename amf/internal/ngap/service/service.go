@@ -248,6 +248,17 @@ func handleConnection(conn *sctp.SCTPConn, bufsize uint32, handler NGAPHandler) 
 // dispatchToWorkerPool extracts the UE ID and dispatches the task to the appropriate worker.
 // For non-UE messages (e.g., NGSetupRequest), it dispatches to a default worker (worker 0).
 func dispatchToWorkerPool(conn net.Conn, msg []byte, handler NGAPHandler) {
+	// Paper mode dispatches from inside the NGAP handler, at the NAS boundary,
+	// so there is nothing to decide here: run the handler on this goroutine and
+	// let it hand off when it has resolved the UE. A message that never reaches
+	// NAS is finished here, on this goroutine, and EndSerialTrace records that.
+	if ngap_internal.SchedulerMode() == factory.NgapSchedulerModePaper {
+		ngap_internal.BeginSerialTrace(conn)
+		handler.HandleMessage(conn, msg)
+		ngap_internal.EndSerialTrace(conn)
+		return
+	}
+
 	// Opened here, on the SCTP reader goroutine, so the trace covers every
 	// instruction that runs before the message reaches a worker.
 	trace := ngap_internal.NewMsgTrace()
@@ -260,18 +271,18 @@ func dispatchToWorkerPool(conn net.Conn, msg []byte, handler NGAPHandler) {
 		return
 	}
 
-	// Extract the dispatch key. The two arms of the benchmark differ here and
-	// only here: upstream keys on the NGAP UE ID as soon as the PDU is
-	// decoded, the paper's policy keys on the subscriber identity, which costs
-	// an extra NAS decode on this goroutine.
+	// Extract the dispatch key. blog keys on the NGAP UE ID as soon as the PDU
+	// is decoded; paper-early keys on the subscriber identity, which costs a
+	// NAS decode on this goroutine for a UE's first message and a cache lookup
+	// for the rest.
 	var (
 		ueID          uint64
 		procedureCode int64
 		found         bool
 		fallback      bool
 	)
-	if ngap_internal.SchedulerMode() == factory.NgapSchedulerModePaper {
-		ueID, procedureCode, found, fallback = ngap_internal.PaperDispatchKey(conn, msg)
+	if ngap_internal.SchedulerMode() == factory.NgapSchedulerModePaperEarly {
+		ueID, procedureCode, found, fallback = ngap_internal.PaperEarlyDispatchKey(conn, msg)
 	} else {
 		ueID, procedureCode, found = ngap_internal.ExtractUEIDWithMeta(msg)
 	}

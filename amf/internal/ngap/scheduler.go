@@ -145,12 +145,14 @@ func NewUEScheduler(numWorkers int, taskBufferSize int, handler func(conn net.Co
 var schedulerMode = factory.NgapSchedulerModeBlog
 
 // SetSchedulerMode picks the dispatch policy. Call before InitScheduler.
+// Anything unrecognised falls back to upstream behaviour.
 func SetSchedulerMode(mode string) {
-	if mode == factory.NgapSchedulerModePaper {
-		schedulerMode = factory.NgapSchedulerModePaper
-		return
+	switch mode {
+	case factory.NgapSchedulerModePaper, factory.NgapSchedulerModePaperEarly:
+		schedulerMode = mode
+	default:
+		schedulerMode = factory.NgapSchedulerModeBlog
 	}
-	schedulerMode = factory.NgapSchedulerModeBlog
 }
 
 // SchedulerMode reports the active dispatch policy.

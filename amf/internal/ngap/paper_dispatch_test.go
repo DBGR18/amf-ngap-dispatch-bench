@@ -14,6 +14,7 @@ import (
 	"github.com/free5gc/ngap"
 	"github.com/free5gc/ngap/ngapType"
 
+	amf_context "github.com/free5gc/amf/internal/context"
 	ngap_testing "github.com/free5gc/amf/internal/ngap/testing"
 )
 
@@ -144,14 +145,14 @@ func suciMobileIdentity(msin string) []byte {
 	return buf
 }
 
-func TestPaperDispatchKey_InitialUEMessageUsesSubscriberIdentity(t *testing.T) {
+func TestPaperEarlyDispatchKey_InitialUEMessageUsesSubscriberIdentity(t *testing.T) {
 	ResetPaperKeyCache()
 	connA := &ngap_testing.SctpConnStub{}
 
 	// A UE whose RAN-UE-NGAP-ID would hash differently from its IMSI.
 	msg := buildInitialUEMessage(t, 9999, suciMobileIdentity("0000000042"))
 
-	key, pc, found, fallback := PaperDispatchKey(connA, msg)
+	key, pc, found, fallback := PaperEarlyDispatchKey(connA, msg)
 	require.True(t, found, "dispatch key should be found")
 	assert.False(t, fallback, "a null-scheme SUCI must not fall back")
 	assert.Equal(t, int64(ngapType.ProcedureCodeInitialUEMessage), pc)
@@ -159,33 +160,32 @@ func TestPaperDispatchKey_InitialUEMessageUsesSubscriberIdentity(t *testing.T) {
 		"key should be the full IMSI (MCC+MNC+MSIN), not the RAN-UE-NGAP-ID")
 }
 
-func TestPaperDispatchKey_GutiRegistrationFallsBack(t *testing.T) {
+func TestPaperEarlyDispatchKey_GutiRegistrationFallsBack(t *testing.T) {
 	ResetPaperKeyCache()
 	connA := &ngap_testing.SctpConnStub{}
 
 	// 5G-GUTI mobile identity: no subscriber identity available this early.
-	guti := []byte{nasMessage.MobileIdentity5GSType5gGuti, 0x02, 0x08, 0x39, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01}
-	msg := buildInitialUEMessage(t, 7777, guti)
+	msg := buildInitialUEMessage(t, 7777, gutiMobileIdentity())
 
-	key, _, found, fallback := PaperDispatchKey(connA, msg)
+	key, _, found, fallback := PaperEarlyDispatchKey(connA, msg)
 	require.True(t, found)
 	assert.True(t, fallback, "a GUTI registration has no SUCI and must fall back")
 	assert.Equal(t, uint64(7777), key, "fallback key is the upstream NGAP UE ID")
 }
 
-func TestPaperDispatchKey_StableAcrossIdentifierChange(t *testing.T) {
+func TestPaperEarlyDispatchKey_StableAcrossIdentifierChange(t *testing.T) {
 	ResetPaperKeyCache()
 	connA := &ngap_testing.SctpConnStub{}
 
 	// Registration teaches the cache that RAN-UE-NGAP-ID 5 is this subscriber.
 	msg := buildInitialUEMessage(t, 5, suciMobileIdentity("0000000042"))
-	first, _, found, _ := PaperDispatchKey(connA, msg)
+	first, _, found, _ := PaperEarlyDispatchKey(connA, msg)
 	require.True(t, found)
 	require.Equal(t, uint64(208930000000042), first)
 
 	// The same message seen again must resolve identically: the whole point of
 	// the policy is that a UE's key never moves.
-	second, _, found, fallback := PaperDispatchKey(connA, msg)
+	second, _, found, fallback := PaperEarlyDispatchKey(connA, msg)
 	require.True(t, found)
 	assert.False(t, fallback)
 	assert.Equal(t, first, second)
@@ -195,19 +195,19 @@ func TestPaperDispatchKey_StableAcrossIdentifierChange(t *testing.T) {
 // one NG connection. Before the key was scoped to the connection, the second
 // registration overwrote the first, and the first UE's later messages then
 // resolved to the second UE's key.
-func TestPaperDispatchKey_SameRanUeIdOnTwoGnbs(t *testing.T) {
+func TestPaperEarlyDispatchKey_SameRanUeIdOnTwoGnbs(t *testing.T) {
 	ResetPaperKeyCache()
 
 	connA := &ngap_testing.SctpConnStub{}
 	connB := &ngap_testing.SctpConnStub{}
 	const sharedRanUeID = 5
 
-	keyA, _, found, fallback := PaperDispatchKey(connA,
+	keyA, _, found, fallback := PaperEarlyDispatchKey(connA,
 		buildInitialUEMessage(t, sharedRanUeID, suciMobileIdentity("0000000042")))
 	require.True(t, found)
 	require.False(t, fallback)
 
-	keyB, _, found, fallback := PaperDispatchKey(connB,
+	keyB, _, found, fallback := PaperEarlyDispatchKey(connB,
 		buildInitialUEMessage(t, sharedRanUeID, suciMobileIdentity("0000000077")))
 	require.True(t, found)
 	require.False(t, fallback)
@@ -228,9 +228,107 @@ func TestPaperDispatchKey_SameRanUeIdOnTwoGnbs(t *testing.T) {
 	}
 }
 
+// gutiMobileIdentity is a 5G-GUTI mobile identity: no subscriber identity is
+// available from a registration carrying one.
+func gutiMobileIdentity() []byte {
+	return []byte{
+		nasMessage.MobileIdentity5GSType5gGuti,
+		0x02, 0x08, 0x39, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+	}
+}
+
+func TestSupiKey(t *testing.T) {
+	tests := []struct {
+		supi string
+		want uint64
+		ok   bool
+	}{
+		{"imsi-208930000000001", 208930000000001, true},
+		{"imsi-310260000000001", 310260000000001, true},
+		{"nai-user@example.com", 0, false},
+		{"imsi-", 0, false},
+		{"208930000000001", 0, false},
+		{"imsi-20893000000000x", 0, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.supi, func(t *testing.T) {
+			got, ok := supiKey(tt.supi)
+			assert.Equal(t, tt.ok, ok)
+			if tt.ok {
+				assert.Equal(t, tt.want, got)
+			}
+		})
+	}
+}
+
+// AmfUe.Supi stays empty until AUSF confirms authentication, so during the
+// registration phase this benchmark is about, only the SUCI is set. Reading the
+// SUCI first is what keeps a UE's key identical before and after that moment.
+func TestSubscriberKeyFromAmfUe(t *testing.T) {
+	tests := []struct {
+		name string
+		suci string
+		supi string
+		want uint64
+		ok   bool
+	}{
+		{"mid registration, suci only", "suci-0-208-93-0000-0-0-0000000042", "", 208930000000042, true},
+		{"after authentication, both", "suci-0-208-93-0000-0-0-0000000042", "imsi-208930000000042", 208930000000042, true},
+		{"supi only", "", "imsi-208930000000042", 208930000000042, true},
+		// A concealed SUCI must keep returning not-ok even once the SUPI is
+		// known, or the UE would move worker the moment authentication
+		// completes - halfway through its own registration.
+		{"protected suci, no supi yet", "suci-0-208-93-0000-1-0-abcdef0123", "", 0, false},
+		{"protected suci, supi known", "suci-0-208-93-0000-1-0-abcdef0123", "imsi-208930000000042", 0, false},
+		{"neither", "", "", 0, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ue := &amf_context.AmfUe{Suci: tt.suci, Supi: tt.supi}
+			got, ok := subscriberKeyFromAmfUe(ue)
+			assert.Equal(t, tt.ok, ok)
+			if tt.ok {
+				assert.Equal(t, tt.want, got)
+			}
+		})
+	}
+
+	got, ok := subscriberKeyFromAmfUe(nil)
+	assert.False(t, ok)
+	assert.Zero(t, got)
+}
+
+// Between findAmfUe matching an existing context and HandleNAS attaching it,
+// the AmfUe hangs off HoldingAmfUe instead. Paper mode dispatches in that
+// window, so both fields have to be consulted.
+func TestSubscriberKeyFromRanUe_UsesHoldingAmfUe(t *testing.T) {
+	ue := &amf_context.AmfUe{Suci: "suci-0-208-93-0000-0-0-0000000042"}
+
+	attached := &amf_context.RanUe{AmfUe: ue}
+	key, ok := SubscriberKeyFromRanUe(attached)
+	require.True(t, ok)
+	assert.Equal(t, uint64(208930000000042), key)
+
+	holding := &amf_context.RanUe{HoldingAmfUe: ue}
+	key, ok = SubscriberKeyFromRanUe(holding)
+	require.True(t, ok)
+	assert.Equal(t, uint64(208930000000042), key)
+
+	_, ok = SubscriberKeyFromRanUe(&amf_context.RanUe{})
+	assert.False(t, ok, "a RanUe with no UE context has no subscriber key")
+
+	_, ok = SubscriberKeyFromRanUe(nil)
+	assert.False(t, ok)
+}
+
 func TestSchedulerModeSelection(t *testing.T) {
 	SetSchedulerMode("paper")
 	assert.Equal(t, "paper", SchedulerMode())
+
+	SetSchedulerMode("paper-early")
+	assert.Equal(t, "paper-early", SchedulerMode())
 
 	SetSchedulerMode("blog")
 	assert.Equal(t, "blog", SchedulerMode())
@@ -256,4 +354,94 @@ func TestDispatchIsDeterministicPerKey(t *testing.T) {
 		assert.Less(t, first, workers)
 		assert.GreaterOrEqual(t, first, 0)
 	}
+}
+
+// A UE whose identity cannot be read from its first message must not move
+// worker on its second.
+//
+// An unrecognised 5G-GUTI registration is the ordinary way to get here: the AMF
+// cannot match the GUTI, so it answers with an Identity Request and does not
+// learn the SUCI until the response has been processed. The InitialUEMessage
+// falls back to the RAN-UE-NGAP-ID the gNB assigned; the Identity Response
+// arrives as an UplinkNASTransport carrying the AMF-UE-NGAP-ID the AMF
+// assigned. Those are different namespaces, so without the cache pinning the
+// first decision this UE would be scattered across two workers.
+func TestPaperEarlyFallbackKeyDoesNotMoveTheUE(t *testing.T) {
+	ResetPaperKeyCache()
+
+	const (
+		ranUeNgapID int64 = 7777
+		amfUeNgapID int64 = 31 // deliberately unrelated to the RAN-UE-NGAP-ID
+	)
+	connA := &ngap_testing.SctpConnStub{}
+
+	first, _, found, fallback := PaperEarlyDispatchKey(connA,
+		buildInitialUEMessage(t, ranUeNgapID, gutiMobileIdentity()))
+	require.True(t, found)
+	require.True(t, fallback)
+	require.Equal(t, uint64(ranUeNgapID), first)
+
+	// The handler has since created the RanUe and allocated an AMF-UE-NGAP-ID.
+	// No AmfUe is attached: the identity is still unknown at this point.
+	self := amf_context.GetSelf()
+	ranUe := &amf_context.RanUe{
+		AmfUeNgapId: amfUeNgapID,
+		RanUeNgapId: ranUeNgapID,
+		Ran:         &amf_context.AmfRan{Conn: connA},
+	}
+	self.RanUePool.Store(amfUeNgapID, ranUe)
+	t.Cleanup(func() { self.RanUePool.Delete(amfUeNgapID) })
+
+	second, pc, found, fallback := PaperEarlyDispatchKey(connA,
+		buildUplinkNASTransport(t, amfUeNgapID, ranUeNgapID))
+	require.True(t, found)
+	assert.False(t, fallback, "the cache answers, so this is not a fresh fallback")
+	assert.Equal(t, int64(ngapType.ProcedureCodeUplinkNASTransport), pc)
+
+	assert.Equal(t, first, second,
+		"a UE that falls back must keep one key, or its first two messages land on two workers")
+	assert.NotEqual(t, uint64(amfUeNgapID), second,
+		"the AMF-UE-NGAP-ID is a different namespace from the key the first message used")
+}
+
+// buildUplinkNASTransport produces a wire-format UplinkNASTransport carrying
+// both NGAP identifiers and an empty NAS PDU; the dispatch decision never looks
+// inside the NAS payload for this procedure.
+func buildUplinkNASTransport(t *testing.T, amfUeNgapID, ranUeNgapID int64) []byte {
+	t.Helper()
+
+	pdu := ngapType.NGAPPDU{
+		Present: ngapType.NGAPPDUPresentInitiatingMessage,
+		InitiatingMessage: &ngapType.InitiatingMessage{
+			ProcedureCode: ngapType.ProcedureCode{Value: ngapType.ProcedureCodeUplinkNASTransport},
+			Criticality:   ngapType.Criticality{Value: ngapType.CriticalityPresentIgnore},
+		},
+	}
+	pdu.InitiatingMessage.Value.Present = ngapType.InitiatingMessagePresentUplinkNASTransport
+	pdu.InitiatingMessage.Value.UplinkNASTransport = &ngapType.UplinkNASTransport{}
+
+	amfIE := ngapType.UplinkNASTransportIEs{}
+	amfIE.Id.Value = ngapType.ProtocolIEIDAMFUENGAPID
+	amfIE.Criticality.Value = ngapType.CriticalityPresentReject
+	amfIE.Value.Present = ngapType.UplinkNASTransportIEsPresentAMFUENGAPID
+	amfIE.Value.AMFUENGAPID = &ngapType.AMFUENGAPID{Value: amfUeNgapID}
+
+	ranIE := ngapType.UplinkNASTransportIEs{}
+	ranIE.Id.Value = ngapType.ProtocolIEIDRANUENGAPID
+	ranIE.Criticality.Value = ngapType.CriticalityPresentReject
+	ranIE.Value.Present = ngapType.UplinkNASTransportIEsPresentRANUENGAPID
+	ranIE.Value.RANUENGAPID = &ngapType.RANUENGAPID{Value: ranUeNgapID}
+
+	nasIE := ngapType.UplinkNASTransportIEs{}
+	nasIE.Id.Value = ngapType.ProtocolIEIDNASPDU
+	nasIE.Criticality.Value = ngapType.CriticalityPresentReject
+	nasIE.Value.Present = ngapType.UplinkNASTransportIEsPresentNASPDU
+	nasIE.Value.NASPDU = &ngapType.NASPDU{Value: []byte{0x7e, 0x00}}
+
+	pdu.InitiatingMessage.Value.UplinkNASTransport.ProtocolIEs.List = append(
+		pdu.InitiatingMessage.Value.UplinkNASTransport.ProtocolIEs.List, amfIE, ranIE, nasIE)
+
+	encoded, err := ngap.Encoder(pdu)
+	require.NoError(t, err)
+	return encoded
 }

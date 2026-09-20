@@ -165,6 +165,18 @@ func (t *MsgTrace) MarkKeyExtracted(key uint64, procedureCode int64, fallback bo
 	t.Fallback = fallback
 }
 
+// MarkSerial tags a message that paper mode handles from end to end on the
+// reader goroutine, because it never reaches the NAS hand-off. worker_id -1
+// identifies those rows in the CSV; MarkSubmitted overwrites it for the
+// messages that do get handed off.
+func (t *MsgTrace) MarkSerial(procedureCode int64) {
+	if t == nil {
+		return
+	}
+	t.ProcedureCode = procedureCode
+	t.WorkerID = -1
+}
+
 func (t *MsgTrace) MarkSubmitted(workerID int) {
 	if t == nil {
 		return

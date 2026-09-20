@@ -5,6 +5,7 @@
 package factory
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/asaskevich/govalidator"
@@ -108,5 +109,57 @@ func TestSctp_validate(t *testing.T) {
 				t.Errorf("Sctp.validate() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// The dispatch mode is the one knob that selects which arm of the benchmark
+// runs, so a typo in it must stop the AMF rather than silently produce results
+// for a different policy than the one the run is labelled with.
+func TestNgapSchedulerMode_validate(t *testing.T) {
+	tests := []struct {
+		mode string
+		ok   bool
+	}{
+		{NgapSchedulerModeBlog, true},
+		{NgapSchedulerModePaper, true},
+		{NgapSchedulerModePaperEarly, true},
+		{"", true}, // omitted: GetNgapSchedulerMode() defaults to blog
+		{"Paper", false},
+		{"paper_early", false},
+		{"paperearly", false},
+		{"nonsense", false},
+	}
+
+	for _, tt := range tests {
+		name := tt.mode
+		if name == "" {
+			name = "(unset)"
+		}
+		t.Run(name, func(t *testing.T) {
+			// A bare Configuration fails every other required field, so look
+			// only at whether this one field was reported.
+			c := &Configuration{NgapSchedulerMode: tt.mode}
+			_, err := govalidator.ValidateStruct(c)
+			reported := err != nil && strings.Contains(err.Error(), "NgapSchedulerMode")
+
+			if tt.ok && reported {
+				t.Errorf("mode %q should be accepted, got: %v", tt.mode, err)
+			}
+			if !tt.ok && !reported {
+				t.Errorf("mode %q should be rejected, but the validator did not report it", tt.mode)
+			}
+		})
+	}
+}
+
+func TestGetNgapSchedulerMode_defaultsToBlog(t *testing.T) {
+	c := &Config{Configuration: &Configuration{}}
+	if got := c.GetNgapSchedulerMode(); got != NgapSchedulerModeBlog {
+		t.Errorf("unset mode should default to %q, got %q", NgapSchedulerModeBlog, got)
+	}
+
+	c.Configuration.NgapSchedulerMode = NgapSchedulerModePaperEarly
+	if got := c.GetNgapSchedulerMode(); got != NgapSchedulerModePaperEarly {
+		t.Errorf("configured mode should be returned, got %q", got)
 	}
 }

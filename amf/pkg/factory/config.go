@@ -47,9 +47,20 @@ const (
 	AmfMbsComResUriPrefix        = "/namf-mbs-comm/v1"
 	AmfMbsBCResUriPrefix         = "/namf-mbs-bc/v1"
 
-	// NGAP worker-pool dispatch policies (amf-mt-bench).
-	NgapSchedulerModeBlog  = "blog"  // blog: key on NGAP UE ID, before NAS decoding
-	NgapSchedulerModePaper = "paper" // paper: key on subscriber identity, after it
+	// NGAP dispatch policies (amf-mt-bench). They differ in two independent
+	// ways: which key a UE is routed by, and where in the message's life the
+	// hand-off to a worker happens.
+	//
+	//	mode         key            hand-off point
+	//	blog         NGAP UE ID     before the NGAP handler, on the raw message
+	//	paper-early  IMSI           before the NGAP handler, on the raw message
+	//	paper        IMSI           inside the NGAP handler, at the NAS boundary
+	//
+	// blog vs paper-early isolates the choice of key; paper-early vs paper
+	// isolates the choice of hand-off point.
+	NgapSchedulerModeBlog       = "blog"
+	NgapSchedulerModePaper      = "paper"
+	NgapSchedulerModePaperEarly = "paper-early"
 )
 
 type Config struct {
@@ -113,7 +124,7 @@ type Configuration struct {
 	DefaultUECtxReq        bool              `yaml:"defaultUECtxReq,omitempty" valid:"type(bool),optional"`
 	NgapWorkerPoolSize     int               `yaml:"ngapWorkerPoolSize,omitempty" valid:"type(int),optional"`
 	NgapTaskBufferSize     int               `yaml:"ngapTaskBufferSize,omitempty" valid:"type(int),optional"`
-	NgapSchedulerMode      string            `yaml:"ngapSchedulerMode,omitempty" valid:"in(blog|paper),optional"`
+	NgapSchedulerMode      string            `yaml:"ngapSchedulerMode,omitempty" valid:"in(blog|paper|paper-early),optional"`
 }
 
 type Logger struct {
@@ -1059,10 +1070,11 @@ func (c *Config) GetNgapTaskBufferSize() int {
 	return 1000 // Default buffer size
 }
 
-// GetNgapSchedulerMode reports which NGAP dispatch policy the worker pool uses:
-// "blog" (free5gc: key on the NGAP UE ID, decided before NAS decoding) or
-// "paper" (key on the subscriber identity, decided after it).
-// Empty config means upstream behaviour.
+// GetNgapSchedulerMode reports which NGAP dispatch policy is in force:
+// "blog" (free5gc: key on the NGAP UE ID, hand off the raw message),
+// "paper-early" (key on the subscriber identity, hand off the raw message) or
+// "paper" (key on the subscriber identity, hand off at the NAS boundary once
+// the NGAP handler has run). Empty config means upstream behaviour.
 func (c *Config) GetNgapSchedulerMode() string {
 	c.RLock()
 	defer c.RUnlock()
