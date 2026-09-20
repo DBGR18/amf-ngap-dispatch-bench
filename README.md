@@ -108,15 +108,24 @@ identity-keyed dispatch in `amf/internal/ngap/paper_dispatch.go`:
    (`subscriberKeyFromNAS`). `imsiKey` checks the protection scheme is `0`
    (null-scheme, so the MSIN is not encrypted) and concatenates the MCC, MNC and
    MSIN digits into the full IMSI, e.g. `208930000000001`. That number is the
-   dispatch key, and it is remembered against the RAN-UE-NGAP-ID.
+   dispatch key, and it is remembered against the pair (gNB connection,
+   RAN-UE-NGAP-ID). The connection is part of the key because a RAN-UE-NGAP-ID is
+   only unique within one gNB; with several gNBs, two UEs can share the same
+   value and must not overwrite each other.
 2. **Every later message.** These carry only the AMF-UE-NGAP-ID, not the
    subscriber identity. `lookupPaperKey` finds the key by AMF-UE-NGAP-ID in a
    `sync.Map`; on the first miss it bridges through the AMF context
-   (`RanUeFindByAmfUeNgapID`) back to the RAN-UE-NGAP-ID remembered in step 1,
-   and caches the result.
+   (`RanUeFindByAmfUeNgapID`) to the UE's gNB connection and RAN-UE-NGAP-ID,
+   looks up the key remembered in step 1, and caches the result.
 3. **Pick the worker.** `key % N`. Because the key never changes, all of a UE's
    messages from registration onward reach one worker, in order.
 
+**Where this goes beyond the paper.** The paper says the IMSI is extracted from
+the Initial UE Message + Registration Request or from the PDU Session
+Establishment Request. It does not describe how a UE's other messages — the
+majority of its traffic — obtain the IMSI. Step 2 above is this project's own
+design, not the paper's. Here the IMSI is read from NAS only on a UE's first
+message; the PDU Session Establishment Request is not decoded for it.
 
 **Not implemented.** The paper additionally splits UEs into two priority
 classes by IMSI parity (even IMSI to threads `0..N-2`, odd IMSI confined to
