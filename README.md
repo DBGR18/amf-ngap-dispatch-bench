@@ -206,15 +206,13 @@ prioritisation is **not** here; only the identity-keyed dispatch is.
 
 ## Known consequences of `paper` mode
 
-The paper's Fig. 4 shows a classification block feeding a thread pool, with
-everything after classification inside a thread. free5gc's NAS processing is
-nested inside the NGAP handler rather than following it, so placing the hand-off
-where the paper places it has three effects the paper's abstraction does not
-model. They are reported here rather than worked around, because working around
-them would mean no longer implementing the paper.
+free5gc nests NAS processing inside the NGAP handler rather than after it, so
+the paper's hand-off point has three effects its Fig. 4 does not model. They are
+reported rather than worked around: working around them would stop this being
+the paper's design.
 
-They are measured, not predicted. A 100-UE registration storm against a `-race`
-build with four NGAP workers, two runs per mode:
+Measured with a 100-UE registration storm against a `-race` build, four workers,
+two runs per mode (a `-race` build's latencies are inflated and are not results):
 
 | mode | UEs completed | data races |
 |---|---|---|
@@ -222,71 +220,44 @@ build with four NGAP workers, two runs per mode:
 | `paper-early` | 100/100, 100/100 | 0, 0 |
 | `paper` | 100/100, 100/100 | **4, 2** |
 
-(A `-race` build's latencies are inflated several-fold and are not usable as
-results; these runs are for the race detector only.)
-
 1. **Blocking SBI calls sit in the serial section.** The N2 response handlers
-   make synchronous HTTP calls to the SMF — `SendUpdateSmContextN2Info` at
-   `internal/ngap/handler.go:980` and `:1006` (InitialContextSetupResponse),
-   `:650` and `:675` (PDUSessionResourceSetupResponse), `:795` and `:855`
-   (PDUSessionResourceNotify), `SendUpdateSmContextDeactivateUpCnxState` at
-   `:314` (UEContextReleaseComplete). In `paper` mode these run on the reader
-   goroutine, so while one UE's SMF call is in flight no other UE's message on
-   that gNB connection can even be decoded. The paper's own headline metric
-   ("wall-clock time from the first Registration Request to the completion of
-   PDU session establishment", §IV.D) spans this phase, so expect `paper` to
-   diverge from `blog` as the UE count grows, and report the serial-section time
-   from the trace rather than only the end-to-end figure.
+   call the SMF synchronously (`SendUpdateSmContextN2Info` at
+   `internal/ngap/handler.go:650`, `:675`, `:795`, `:855`, `:980`, `:1006`;
+   `SendUpdateSmContextDeactivateUpCnxState` at `:314`). In `paper` these run on
+   the reader goroutine, so no other UE's message on that gNB connection can be
+   decoded while one SMF call is in flight. **299 of 899 messages — a third —
+   never reached a worker** (`worker_id = -1`): InitialContextSetupResponse
+   ×100, PDUSessionResourceSetupResponse ×100, UEContextReleaseComplete ×98,
+   NGSetup ×1; `blog` and `paper-early` handed off all of them. The paper's
+   headline metric spans this phase (§IV.D), so expect `paper` to diverge from
+   `blog` as the UE count grows, and report the serial section from the trace
+   rather than only the end-to-end figure.
 
-   In the runs above, 299 of 899 inbound NGAP messages — a third of the traffic
-   — were handled on the reader goroutine with no hand-off at all
-   (`worker_id = -1`): InitialContextSetupResponse (procedure code 14) ×100,
-   PDUSessionResourceSetupResponse (29) ×100, UEContextReleaseComplete (41)
-   ×98, NGSetup (21) ×1. `blog` and `paper-early` handed off every one of them.
-
-2. **A UE's NGAP half and NAS half run on different goroutines.** The reader may
-   be inside message N+1's handler while a worker is still in message N's NAS
-   processing for the same UE — routinely, since the AMF's
-   `InitialContextSetupRequest` and the UE's `RegistrationComplete` come back at
-   about the same time. free5gc assumes one goroutine per UE at a time;
-   `AmfUe.Lock` (`internal/context/amf_ue.go:195`) guards the SBI↔signalling
-   boundary, not two signalling goroutines, and nothing in `internal/ngap` takes
-   it except `handler.go:337`. `paper-early` does not have this problem: it
-   hands the whole handler to one worker, and takes its dispatch key from a
-   cache rather than from the shared `AmfUe`.
-
-   Every report from those runs has the same shape — the reader goroutine tears
-   a UE down while a NAS worker is still inside that UE's deregistration:
+2. **A UE's NGAP half and NAS half run on different goroutines.** free5gc
+   assumes one goroutine per UE; `AmfUe.Lock` (`internal/context/amf_ue.go:195`)
+   guards the SBI↔signalling boundary, not two signalling goroutines. Every race
+   found has one shape — the reader goroutine tears a UE down
+   (`handleUEContextReleaseCompleteMain`, or `HandleSCTPNotification` →
+   `AmfRan.Remove`) while a NAS worker is still in that UE's deregistration:
 
    | written on the reader goroutine | read in a NAS worker |
    |---|---|
-   | `AmfUe.NASLog` / `GmmLog`, `amf_ue.go:380` (`UpdateLogFields`, from `DetachRanUe`) | `internal/gmm/sm.go:27` |
-   | the `AmfUe.RanUe` map, `delete()` in `DetachRanUe` (`amf_ue.go:354`) | `AmfUe.ClearRegistrationRequestData` |
+   | `AmfUe.NASLog`/`GmmLog`, `amf_ue.go:380` | `internal/gmm/sm.go:27` |
+   | the `AmfUe.RanUe` map, `delete()` at `amf_ue.go:354` | `ClearRegistrationRequestData` |
 
-   The write arrives by two paths, both on the reader goroutine:
-   `handleUEContextReleaseCompleteMain` (`handler.go:338`) and
-   `HandleSCTPNotification` → `AmfRan.Remove`. The second is not an NGAP
-   dispatch at all and runs on that goroutine in every mode; it only races here
-   because `paper` leaves the UE's NAS processing on another one.
+   The map entry is the serious one: a concurrent read and delete can abort the
+   process, not merely yield a stale value. No run has hit that yet.
+   `paper-early` has neither problem — one worker per UE, and its key comes from
+   a cache rather than from the shared `AmfUe`.
 
-   The `AmfUe.RanUe` entry is the serious half: a concurrent map read and
-   delete can abort the process with `concurrent map read and map write`,
-   rather than merely yielding a stale value. No run has hit that yet.
+3. **A UE whose identity arrives late changes worker once.** A registration the
+   AMF cannot match by 5G-GUTI dispatches on the fallback key until the Identity
+   Response has been processed, then on the IMSI. `paper-early` pins the first
+   decision in its cache; pinning here would mean giving `paper` the same cache.
+   Fresh SUCI registrations — the normal benchmark load — never move.
 
-3. **A UE whose identity arrives late changes worker once.** `paper` reads the
-   identity from the UE context at every hand-off, so a registration the AMF
-   cannot match by 5G-GUTI dispatches on the fallback key until the Identity
-   Response has been processed, and on the IMSI afterwards — moving the UE to a
-   different worker mid-registration, with the previous message possibly still
-   in flight on the old one. `paper-early` pins the first decision in its cache
-   and does not move. Pinning here would mean giving `paper` a cache of its own,
-   which is the mirror of the AMF context that this design exists to avoid.
-   Fresh registrations carrying a SUCI — the normal benchmark load — are
-   IMSI-keyed from their first message and never move.
-
-Neither the paper nor its evaluation discusses per-UE state sharing; its model
-never splits a UE across two execution contexts, so the question does not arise
-there.
+Neither the paper nor its evaluation discusses per-UE state sharing: its model
+never splits a UE across two execution contexts.
 
 ## Build, test, run
 
