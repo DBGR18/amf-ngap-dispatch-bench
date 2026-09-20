@@ -1,20 +1,31 @@
-# AMF NGAP dispatch modes: `blog` and `paper`
+# AMF NGAP dispatch modes: `blog`, `paper-early` and `paper`
 
-A copy of free5gc's AMF with one addition: the AMF's NGAP worker pool can
-dispatch incoming messages to its workers in one of two ways, selected by a
-setting in `amfcfg.yaml`.
+A copy of free5gc's AMF with one addition: the AMF can dispatch incoming NGAP
+work to parallel workers in one of three ways, selected by a setting in
+`amfcfg.yaml`.
 
 | mode | where it comes from |
 |---|---|
 | `blog` | free5gc's own worker pool, as described in the [free5gc blog post](https://free5gc.org/blog/20260429/20260429/) ([AMF PR #194](https://github.com/free5gc/amf/pull/194)). Dispatches on the NGAP UE ID. |
-| `paper` | The dispatch idea from Nha & Nakao, *Multithreading-Based AMF Optimization for Pre-Slice Congestion Control in 5G Core Networks* (IEEE GC Wkshps 2025, pp. 2167–2172). Dispatches on the subscriber identity. |
+| `paper-early` | The paper's dispatch key, at free5gc's dispatch point. |
+| `paper` | The dispatch idea from Nha & Nakao, *Multithreading-Based AMF Optimization for Pre-Slice Congestion Control in 5G Core Networks* (IEEE GC Wkshps 2025, pp. 2167–2172), at the paper's own dispatch point. |
 
-Everything else — the worker pool, the per-worker queues, backpressure, the
-shutdown drain — is free5gc's and is shared by both modes. The only thing that
-differs is **how the dispatch key is computed** for each message.
+The three arms differ along two independent axes — **which key** a UE is routed
+by, and **where** in a message's life the hand-off to a worker happens:
 
-> The load-generation and measurement harness used to compare the two modes is
-> not published yet; this repository contains the implementation only.
+| | dispatch key | hand-off point |
+|---|---|---|
+| `blog` | NGAP UE ID | on the raw message, before the NGAP handler runs |
+| `paper-early` | subscriber IMSI | on the raw message, before the NGAP handler runs |
+| `paper` | subscriber IMSI | inside the NGAP handler, at the NAS boundary |
+
+Comparing `blog` with `paper-early` isolates the choice of key. Comparing
+`paper-early` with `paper` isolates the choice of hand-off point. That
+separation is the reason all three exist: the paper changes both at once, and
+the two changes have very different consequences.
+
+> The load-generation and measurement harness used to compare the modes is not
+> published yet; this repository contains the implementation only.
 
 ## Configuration
 
@@ -28,110 +39,218 @@ Three keys under `configuration:`:
 ```yaml
 configuration:
   # ... the rest of the usual free5gc AMF config ...
-  ngapSchedulerMode: paper   # blog | paper   (default: blog)
+  ngapSchedulerMode: paper   # blog | paper-early | paper   (default: blog)
   ngapWorkerPoolSize: 4      # number of workers; 0 = runtime.NumCPU()
   ngapTaskBufferSize: 4096   # queue depth of each worker
 ```
 
 | key | values | default |
 |---|---|---|
-| `ngapSchedulerMode` | `blog`, `paper` | `blog` (stock free5gc behaviour) |
+| `ngapSchedulerMode` | `blog`, `paper-early`, `paper` | `blog` (stock free5gc behaviour) |
 | `ngapWorkerPoolSize` | integer ≥ 0 | `0`, meaning one worker per CPU |
 | `ngapTaskBufferSize` | integer > 0 | `1000` |
 
 - **Switching modes** means editing `ngapSchedulerMode` and restarting the AMF;
   the mode is read once at startup.
-- Values are case-sensitive. Anything other than `blog` or `paper` (including
-  `Paper`) is rejected at startup by the config validator.
+- Values are case-sensitive. Anything other than the three listed (including
+  `Paper` or `paper_early`) is rejected at startup by the config validator.
 - **Do not add a second copy of the worker keys.** free5gc's stock `amfcfg.yaml`
   already contains `ngapWorkerPoolSize` and `ngapTaskBufferSize` near the end of
   `configuration:`. Edit those lines. The YAML parser silently lets the *last*
   duplicate key win, so a stray earlier copy is ignored without any message and
   you end up with a different worker count than you configured.
-- **Check it took effect** in the AMF log at startup:
+- **Check it took effect** in the AMF log at startup. Every mode prints:
 
   ```
   Initializing NGAP worker pool with 4 workers (buffer size: 4096, mode: paper)
+  ```
+
+  followed by the pool that was actually built — for `blog` and `paper-early`:
+
+  ```
   Initializing UE Scheduler with 4 workers
   ```
 
-  The second line is the pool that was actually built; if it does not show the
-  worker count you set, the config is not what you think it is.
+  and for `paper`:
 
-## How the two modes dispatch
+  ```
+  Initializing NAS Scheduler with 4 workers (buffer size: 4096)
+  ```
 
-Both modes share one path. A single goroutine reads NGAP messages from the SCTP
-socket and hands each to `dispatchToWorkerPool()`
+  If the second line names the wrong pool or the wrong worker count, the config
+  is not what you think it is.
+
+## How the modes dispatch
+
+### `blog` and `paper-early`
+
+A single goroutine per gNB connection reads NGAP messages off the SCTP socket
+and hands each to `dispatchToWorkerPool()`
 (`amf/internal/ngap/service/service.go`), which computes a **dispatch key**,
-picks `worker = key % N`, and puts the message on that worker's own buffered
-channel. Each worker drains its own channel in order and does the full message
-handling. The mode only changes step 1:
+picks `worker = key % N`, and puts the raw message on that worker's own buffered
+channel. The worker then runs the entire NGAP handler, NAS processing included.
+The mode only changes how the key is computed:
 
 ```
 SCTP reader goroutine
   │
   │  dispatchToWorkerPool()                     internal/ngap/service/service.go
   │
-  ├─ mode = blog ─────► ExtractUEIDWithMeta()   internal/ngap/ue_id_extractor.go
+  ├─ blog ────────────► ExtractUEIDWithMeta()   internal/ngap/ue_id_extractor.go
   │                     decode the NGAP PDU, read the UE's NGAP ID out of it
   │
-  └─ mode = paper ────► PaperDispatchKey()      internal/ngap/paper_dispatch.go
+  └─ paper-early ─────► PaperEarlyDispatchKey() internal/ngap/paper_dispatch.go
                         decode the NGAP PDU; on a UE's first message also decode
-                        the NAS payload and read its subscriber identity;
-                        on later messages look that identity up
+                        the NAS payload for its SUCI; on later messages look the
+                        UE up in the AMF context
   │
   ▼  worker = key % N                           internal/ngap/scheduler.go
-  ▼  that worker's own channel  ──►  worker goroutine handles the message
+  ▼  that worker's channel ──► worker goroutine runs the whole handler
 ```
 
-`SetSchedulerMode()` is called from `pkg/service/init.go` right before the pool
-is created, and `dispatchToWorkerPool()` checks the mode on every message.
+### `paper`
 
-|  | `blog` | `paper` |
-|---|---|---|
-| dispatch key | RAN-UE-NGAP-ID on the first message (InitialUEMessage), AMF-UE-NGAP-ID on every later one | the UE's IMSI (MCC+MNC+MSIN), taken from its SUCI, on every message |
-| known after | the NGAP decode | the NAS decode (first message), or a lookup (later messages) |
-| extra work on the reader goroutine | none | a NAS decode on InitialUEMessage; a map lookup on every other UE message |
-| key stable for the UE's lifetime | no — it changes when the AMF assigns AMF-UE-NGAP-ID, so a UE's later messages can land on a different worker | yes — a UE's messages always go to the same worker queue |
-| messages with no UE (e.g. NGSetupRequest) | worker 0 | worker 0 |
+The NGAP handler runs on the reader goroutine, and the hand-off happens inside
+it, where it calls into NAS. By then the handler has already resolved the UE's
+identity for its own reasons, so the key costs no extra decoding.
 
-## How the paper's method is implemented
+```
+SCTP reader goroutine
+  │
+  │  handler.HandleMessage()                    internal/ngap/service/service.go
+  ▼
+  ngap.Dispatch ──► handleInitialUEMessageMain  internal/ngap/handler.go
+  │                   :457  ran.NewRanUe()
+  │                   :468  DecodePlainNasNoIntegrityCheck()   (upstream's own)
+  │                   :494  GetNas5GSMobileIdentity()  ──► SUCI
+  │                   :513  findAmfUe()
+  │                   :580  SubmitInitialNAS(ranUe, …, id, idType)
+  │                 handleUplinkNASTransportMain
+  │                   :136  SubmitNAS(ranUe, …)      key from ranUe.AmfUe
+  │
+  ▼  worker = IMSI % N                          internal/ngap/paper_nas_pool.go
+  ▼  that worker's channel ──► worker goroutine runs HandleNAS onward
+```
 
-The paper classifies a UE from an identity that is available before any slice
-information exists, and assigns UEs to threads on that basis. Here that is the
-identity-keyed dispatch in `amf/internal/ngap/paper_dispatch.go`:
+Messages that never reach NAS — `InitialContextSetupResponse`,
+`PDUSessionResourceSetupResponse`, `UEContextReleaseComplete` and the rest of
+the N2 procedures — have no hand-off point and are handled end to end on the
+reader goroutine. See **Known consequences of `paper` mode** below.
 
-1. **First message (InitialUEMessage).** Read the RAN-UE-NGAP-ID and the NAS
-   PDU out of the NGAP message. Decode the NAS Registration Request (plain NAS —
-   there is no security context yet), require its mobile identity to be a SUCI,
-   and turn it into a string such as `suci-0-208-93-0000-0-0-0000000001`
-   (`subscriberKeyFromNAS`). `imsiKey` checks the protection scheme is `0`
-   (null-scheme, so the MSIN is not encrypted) and concatenates the MCC, MNC and
-   MSIN digits into the full IMSI, e.g. `208930000000001`. That number is the
-   dispatch key, and it is remembered against the pair (gNB connection,
-   RAN-UE-NGAP-ID). The connection is part of the key because a RAN-UE-NGAP-ID is
-   only unique within one gNB; with several gNBs, two UEs can share the same
-   value and must not overwrite each other.
-2. **Every later message.** These carry only the AMF-UE-NGAP-ID, not the
-   subscriber identity. `lookupPaperKey` finds the key by AMF-UE-NGAP-ID in a
-   `sync.Map`; on the first miss it bridges through the AMF context
-   (`RanUeFindByAmfUeNgapID`) to the UE's gNB connection and RAN-UE-NGAP-ID,
-   looks up the key remembered in step 1, and caches the result.
-3. **Pick the worker.** `key % N`. Because the key never changes, all of a UE's
-   messages from registration onward reach one worker, in order.
+### Summary
 
-**Where this goes beyond the paper.** The paper says the IMSI is extracted from
-the Initial UE Message + Registration Request or from the PDU Session
-Establishment Request. It does not describe how a UE's other messages — the
-majority of its traffic — obtain the IMSI. Step 2 above is this project's own
-design, not the paper's. Here the IMSI is read from NAS only on a UE's first
-message; the PDU Session Establishment Request is not decoded for it.
+|  | `blog` | `paper-early` | `paper` |
+|---|---|---|---|
+| dispatch key | RAN-UE-NGAP-ID on InitialUEMessage, AMF-UE-NGAP-ID afterwards | the UE's IMSI | the UE's IMSI |
+| key known after | the NGAP decode | the NAS decode (first message) or a cache lookup (later ones) | the NGAP handler has resolved the UE |
+| work on the reader goroutine | NGAP decode | NGAP decode, plus a NAS decode on InitialUEMessage and a cache lookup otherwise | the whole NGAP handler |
+| key stable for the UE's lifetime | no — it changes when the AMF assigns AMF-UE-NGAP-ID, so a UE's later messages can land on a different worker | yes | yes |
+| one UE touched by one goroutine at a time | no (see above) | yes | **no** |
+| non-NAS N2 messages | in a worker | in a worker | on the reader goroutine |
+| messages with no UE (e.g. NGSetupRequest) | worker 0 | worker 0 | reader goroutine |
 
-**Not implemented.** The paper additionally splits UEs into two priority
-classes by IMSI parity (even IMSI to threads `0..N-2`, odd IMSI confined to
-thread `N-1`). That prioritisation is **not** here; only the identity-keyed
-dispatch is.
+## How the subscriber key is derived
 
+Both paper-derived modes key on the full IMSI (MCC+MNC+MSIN, e.g.
+`208930000000001`), but they obtain it differently, and the difference is forced
+by *where* each one decides.
+
+1. **First message.** The only one carrying the identity, and the only one with
+   no UE context yet, so it comes from the NAS payload: `paper-early` decodes
+   the Registration Request, `paper` reuses the decode
+   `handleInitialUEMessageMain` already does at `handler.go:468`. `imsiKey`
+   requires protection scheme `0` (null scheme, MSIN in the clear).
+2. **Later messages.** These carry only the AMF-UE-NGAP-ID.
+   - `paper-early` looks the key up in a cache populated at registration, keyed
+     by `{gNB connection, RAN-UE-NGAP-ID}` and bridged to the AMF-UE-NGAP-ID on
+     first use. It **must not** read the identity out of the AMF context here:
+     it decides on the SCTP reader goroutine while a worker may be inside the
+     same UE's previous message, and `AmfUe.Suci`/`AmfUe.Supi` are written from
+     there (`internal/gmm/handler.go:477`, `:1563`, `:2035`) — a data race,
+     confirmed with `-race` against a live registration load. The cache is
+     race-free by construction: it reads only fields fixed when the `RanUe` was
+     created.
+   - `paper` holds the `*RanUe` the handler has already resolved and reads
+     `AmfUe` directly, preferring `Suci` over `Supi` because `Supi` stays empty
+     until AUSF confirms authentication. That read is subject to the same race,
+     but `paper`'s hand-off point already puts a UE's NGAP half and NAS half on
+     two goroutines, so it adds no exposure the mode does not already have. See
+     **Known consequences** below.
+3. **Worker** = `key % N`.
+
+**Fallback.** When no identity can be read the key is the RAN-UE-NGAP-ID, and
+`paper-early` caches that decision too — so a UE whose SUCI only arrives later
+(an unmatched 5G-GUTI, answered with an Identity Request) keeps the key it was
+first given instead of switching to an IMSI key and moving worker
+mid-registration. A RAN-UE-NGAP-ID is unique only within one gNB, which is why
+the cache is scoped to the connection: unscoped, a second gNB's registration
+would overwrite the first's entry and send that UE's later messages to the wrong
+worker.
+
+**Requires the null scheme.** With a profile A/B SUCI the MSIN is ciphertext and
+nobody in the AMF holds the IMSI until AUSF/UDM de-conceals it, several SBI
+round-trips into `HandleNAS`. Such a UE falls back for its whole lifetime —
+`subscriberKeyFromAmfUe` deliberately refuses the SUPI while a concealed SUCI is
+present, since taking it would move the UE to another worker the instant
+authentication completed. Those runs are **not a valid paper arm**; the fallback
+rate is in the trace CSV, so check it.
+
+**Where this goes beyond the paper.** The paper takes the IMSI from the Initial
+UE Message + Registration Request or the PDU Session Establishment Request, and
+does not describe how a UE's other messages — the majority of its traffic —
+obtain it. Step 2 above is this project's own design.
+
+**Not implemented.** The paper also splits UEs into two priority classes by IMSI
+parity (even to threads `0..N-2`, odd confined to thread `N-1`). That
+prioritisation is **not** here; only the identity-keyed dispatch is.
+
+## Known consequences of `paper` mode
+
+The paper's Fig. 4 shows a classification block feeding a thread pool, with
+everything after classification inside a thread. free5gc's NAS processing is
+nested inside the NGAP handler rather than following it, so placing the hand-off
+where the paper places it has three effects the paper's abstraction does not
+model. They are reported here rather than worked around, because working around
+them would mean no longer implementing the paper.
+
+1. **Blocking SBI calls sit in the serial section.** The N2 response handlers
+   make synchronous HTTP calls to the SMF — `SendUpdateSmContextN2Info` at
+   `internal/ngap/handler.go:980` and `:1006` (InitialContextSetupResponse),
+   `:650` and `:675` (PDUSessionResourceSetupResponse), `:795` and `:855`
+   (PDUSessionResourceNotify), `SendUpdateSmContextDeactivateUpCnxState` at
+   `:314` (UEContextReleaseComplete). In `paper` mode these run on the reader
+   goroutine, so while one UE's SMF call is in flight no other UE's message on
+   that gNB connection can even be decoded. The paper's own headline metric
+   ("wall-clock time from the first Registration Request to the completion of
+   PDU session establishment", §IV.D) spans this phase, so expect `paper` to
+   diverge from `blog` as the UE count grows, and report the serial-section time
+   from the trace rather than only the end-to-end figure.
+
+2. **A UE's NGAP half and NAS half run on different goroutines.** The reader may
+   be inside message N+1's handler while a worker is still in message N's NAS
+   processing for the same UE — routinely, since the AMF's
+   `InitialContextSetupRequest` and the UE's `RegistrationComplete` come back at
+   about the same time. free5gc assumes one goroutine per UE at a time;
+   `AmfUe.Lock` (`internal/context/amf_ue.go:195`) guards the SBI↔signalling
+   boundary, not two signalling goroutines, and nothing in `internal/ngap` takes
+   it except `handler.go:337`. `paper-early` does not have this problem: it
+   hands the whole handler to one worker, and takes its dispatch key from a
+   cache rather than from the shared `AmfUe`.
+
+3. **A UE whose identity arrives late changes worker once.** `paper` reads the
+   identity from the UE context at every hand-off, so a registration the AMF
+   cannot match by 5G-GUTI dispatches on the fallback key until the Identity
+   Response has been processed, and on the IMSI afterwards — moving the UE to a
+   different worker mid-registration, with the previous message possibly still
+   in flight on the old one. `paper-early` pins the first decision in its cache
+   and does not move. Pinning here would mean giving `paper` a cache of its own,
+   which is the mirror of the AMF context that this design exists to avoid.
+   Fresh registrations carrying a SUCI — the normal benchmark load — are
+   IMSI-keyed from their first message and never move.
+
+Neither the paper nor its evaluation discusses per-UE state sharing; its model
+never splits a UE across two execution contexts, so the question does not arise
+there.
 
 ## Build, test, run
 
@@ -139,6 +258,13 @@ dispatch is.
 cd amf
 go build -o ../bin/amf ./cmd
 go test ./internal/ngap/ ./pkg/factory/
+```
+
+Consequence 2 above makes `-race` worth running against a live registration
+load, not just the unit tests:
+
+```bash
+go build -race -o ../bin/amf-race ./cmd
 ```
 
 The binary is a drop-in replacement for the AMF of a free5gc v4.2.3 deployment
@@ -163,6 +289,14 @@ so time spent before dispatch (`submitted - recv`), waiting in the queue
 separated. With the variable unset it does nothing beyond one atomic load per
 message and a nil check at each hook.
 
+In `paper` mode the serial section is larger by construction, and a message that
+never reached NAS has **`worker_id = -1`** with the middle three timestamps
+empty; for those rows `handled - recv` is the whole serial cost. Those rows are
+how consequence 1 above is measured.
+
+The trace is kept per gNB connection, not in one global, because there is one
+SCTP reader goroutine per connection.
+
 ## What differs from upstream
 
 `amf/` is free5gc's AMF, vendored with its own git history removed:
@@ -178,16 +312,26 @@ Changes relative to that commit:
 
 | file | change |
 |---|---|
-| `internal/ngap/paper_dispatch.go` | new — the `paper` dispatch key |
+| `internal/ngap/paper_dispatch.go` | new — the subscriber key, shared by both paper modes |
 | `internal/ngap/paper_dispatch_test.go` | new — unit tests for it |
+| `internal/ngap/paper_nas_pool.go` | new — `paper` mode's NAS-level worker pool and hand-off |
+| `internal/ngap/paper_nas_pool_test.go` | new — routing, ordering, drain and trace-scoping tests |
 | `internal/ngap/trace.go` | new — the optional per-message timing above |
-| `internal/ngap/scheduler.go` | mode selection; one shared dispatch helper both modes use; trace hooks |
-| `internal/ngap/service/service.go` | choose `blog` or `paper` per message |
+| `internal/ngap/scheduler.go` | mode selection; one shared dispatch helper; trace hooks |
+| `internal/ngap/service/service.go` | pick the mode per message |
+| `internal/ngap/dispatcher.go` | one line: record the procedure code of a serially handled message |
+| `internal/ngap/handler.go` | three call sites go through the NAS hand-off instead of calling `HandleNAS` directly |
 | `internal/ngap/ue_id_extractor.go` | also returns the NGAP procedure code; a variant that takes an already-decoded PDU |
 | `pkg/factory/config.go` | the `ngapSchedulerMode` setting, its validation and default |
-| `pkg/service/init.go` | apply the mode before the pool starts; trace start and stop |
+| `pkg/factory/config_test.go` | tests for that setting |
+| `pkg/service/init.go` | apply the mode, start the pool the mode needs; trace start and stop |
 
-With `ngapSchedulerMode` unset or `blog`, the AMF behaves as upstream does.
+With `ngapSchedulerMode` unset or `blog`, the AMF behaves as upstream does:
+`SubmitNAS` is a direct call to `HandleNAS`, and nothing else on the path
+changes.
+
+`internal/sbi/processor/callback.go:381` also calls `HandleNAS`, from an SBI
+goroutine rather than the NGAP path. It is left as a direct call in every mode.
 
 The sample config, `config/amfcfg.yaml`, is not part of `amf/` (upstream's AMF
 repository ships none). It is free5gc v4.2.3's own `config/amfcfg.yaml` with the
