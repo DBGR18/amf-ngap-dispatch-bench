@@ -27,3 +27,4 @@ __pycache__/
 # Editor / OS noise
 *.swp
 .DS_Store
+.gitignore
