@@ -3,6 +3,7 @@ package message
 import (
 	"fmt"
 
+	"github.com/free5gc/amf/internal/benchtrace"
 	"github.com/free5gc/amf/internal/context"
 	gmm_common "github.com/free5gc/amf/internal/gmm/common"
 	"github.com/free5gc/amf/internal/logger"
@@ -48,6 +49,7 @@ func SendDLNASTransport(ue *context.RanUe, payloadContainerType uint8, nasPdu []
 	}
 
 	isNasMsgSent = true
+	benchtrace.RecordForRanUE("authentication_request_sent", ue)
 	ngap_message.SendDownlinkNasTransport(ue, nasMsg, nil)
 }
 
@@ -590,6 +592,7 @@ func SendRegistrationAccept(
 	}
 
 	isNasMsgSent = true
+	benchtrace.RecordForRanUE("registration_accept_sent", amfUe.RanUe[anType])
 	if anType == models.AccessType_NON_3_GPP_ACCESS {
 		// TS 23.502 4.12.2.2 10a ~ 13: if non-3gpp, AMF should send initial context setup request to N3IWF first,
 		// and send registration accept after receiving initial context setup response

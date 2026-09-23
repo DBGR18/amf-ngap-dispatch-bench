@@ -2,7 +2,11 @@ package ngap
 
 import (
 	"encoding/csv"
+	"encoding/json"
+	"github.com/free5gc/amf/internal/benchtrace"
+	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -28,11 +32,18 @@ import (
 // When the variable is unset every hook costs one atomic load.
 
 type MsgTrace struct {
-	Recv         time.Time
-	KeyExtracted time.Time
-	Submitted    time.Time
-	WorkerStart  time.Time
-	Handled      time.Time
+	RecvMono         int64
+	KeyExtractedMono int64
+	SubmittedMono    int64
+	WorkerStartMono  int64
+	HandledMono      int64
+	ConnectionID     string
+	MessageSeq       uint64
+	Recv             time.Time
+	KeyExtracted     time.Time
+	Submitted        time.Time
+	WorkerStart      time.Time
+	Handled          time.Time
 
 	WorkerID      int
 	Key           uint64
@@ -46,6 +57,10 @@ var (
 	traceDropped atomic.Uint64
 	traceWG      sync.WaitGroup
 	traceOnce    sync.Once
+	tracePath    string
+	traceWritten atomic.Uint64
+	traceErr     atomic.Value
+	messageSeqs  sync.Map // connection ID -> *atomic.Uint64
 )
 
 // InitTrace wires up the CSV writer if AMF_BENCH_TRACE names an output file.
@@ -63,6 +78,8 @@ func InitTrace() {
 			return
 		}
 
+		tracePath = path
+
 		// Generous buffer: dropping rows would silently bias the results, so
 		// prefer memory over loss and report any drop that still happens.
 		traceCh = make(chan *MsgTrace, 1<<16)
@@ -71,15 +88,27 @@ func InitTrace() {
 		traceWG.Add(1)
 		go func() {
 			defer traceWG.Done()
-			defer f.Close()
+			defer func() {
+				if err := f.Close(); err != nil {
+					traceErr.Store(err.Error())
+				}
+			}()
 
 			w := csv.NewWriter(f)
-			defer w.Flush()
+			defer func() {
+				w.Flush()
+				if err := w.Error(); err != nil {
+					traceErr.Store(err.Error())
+				}
+			}()
 
 			if err := w.Write([]string{
 				"recv_ns", "key_extracted_ns", "submitted_ns", "worker_start_ns", "handled_ns",
 				"worker_id", "key", "procedure_code", "fallback",
+				"schema_version", "run_id", "mode", "worker_count", "connection_id", "message_seq",
+				"recv_mono_ns", "key_extracted_mono_ns", "submitted_mono_ns", "worker_start_mono_ns", "handled_mono_ns",
 			}); err != nil {
+				traceErr.Store(err.Error())
 				logger.NgapLog.Errorf("bench trace: header write failed: %v", err)
 				return
 			}
@@ -104,12 +133,20 @@ func InitTrace() {
 						strconv.FormatUint(t.Key, 10),
 						strconv.FormatInt(t.ProcedureCode, 10),
 						strconv.FormatBool(t.Fallback),
+						"2", os.Getenv("RUN_ID"), os.Getenv("AMF_MODE"), os.Getenv("AMF_WORKERS"), t.ConnectionID, strconv.FormatUint(t.MessageSeq, 10),
+						mono(t.RecvMono), mono(t.KeyExtractedMono), mono(t.SubmittedMono), mono(t.WorkerStartMono), mono(t.HandledMono),
 					}); err != nil {
+						traceErr.Store(err.Error())
 						logger.NgapLog.Errorf("bench trace: row write failed: %v", err)
 						return
 					}
+					traceWritten.Add(1)
 				case <-flush.C:
 					w.Flush()
+					if err := w.Error(); err != nil {
+						traceErr.Store(err.Error())
+						return
+					}
 				}
 			}
 		}()
@@ -125,6 +162,16 @@ func StopTrace() {
 	}
 	close(traceCh)
 	traceWG.Wait()
+	summary := map[string]any{"schema_version": 2, "run_id": os.Getenv("RUN_ID"), "rows_written": traceWritten.Load(), "rows_dropped": traceDropped.Load(), "submit_blocked_ns": submitBlockedNs.Load(), "clean_shutdown": true}
+	if e := traceErr.Load(); e != nil {
+		summary["error"] = e.(string)
+		summary["clean_shutdown"] = false
+	}
+	if data, err := json.MarshalIndent(summary, "", "  "); err == nil {
+		if err := os.WriteFile(filepath.Join(filepath.Dir(tracePath), "amf_trace_summary.json"), append(data, '\n'), 0640); err != nil {
+			logger.NgapLog.Errorf("bench trace summary: %v", err)
+		}
+	}
 	if n := traceDropped.Load(); n > 0 {
 		logger.NgapLog.Warnf("bench trace: dropped %d rows (buffer full) - results are incomplete", n)
 	}
@@ -148,17 +195,27 @@ func AddSubmitBlocked(d time.Duration) {
 
 // NewMsgTrace starts a trace for a message just read off the wire.
 // Returns nil when tracing is disabled, and every hook tolerates a nil trace.
-func NewMsgTrace() *MsgTrace {
+func NewMsgTrace(conns ...net.Conn) *MsgTrace {
 	if !traceEnabled.Load() {
 		return nil
 	}
-	return &MsgTrace{Recv: time.Now()}
+	t := &MsgTrace{Recv: time.Now(), RecvMono: benchtrace.ClockMonotonicNS()}
+	if len(conns) > 0 && conns[0] != nil {
+		t.ConnectionID = benchtrace.ConnectionID(conns[0])
+		if t.ConnectionID == "" {
+			t.ConnectionID = conns[0].RemoteAddr().String()
+		}
+		counter, _ := messageSeqs.LoadOrStore(t.ConnectionID, &atomic.Uint64{})
+		t.MessageSeq = counter.(*atomic.Uint64).Add(1)
+	}
+	return t
 }
 
 func (t *MsgTrace) MarkKeyExtracted(key uint64, procedureCode int64, fallback bool) {
 	if t == nil {
 		return
 	}
+	t.KeyExtractedMono = benchtrace.ClockMonotonicNS()
 	t.KeyExtracted = time.Now()
 	t.Key = key
 	t.ProcedureCode = procedureCode
@@ -181,6 +238,7 @@ func (t *MsgTrace) MarkSubmitted(workerID int) {
 	if t == nil {
 		return
 	}
+	t.SubmittedMono = benchtrace.ClockMonotonicNS()
 	t.Submitted = time.Now()
 	t.WorkerID = workerID
 }
@@ -189,6 +247,7 @@ func (t *MsgTrace) MarkWorkerStart() {
 	if t == nil {
 		return
 	}
+	t.WorkerStartMono = benchtrace.ClockMonotonicNS()
 	t.WorkerStart = time.Now()
 }
 
@@ -197,6 +256,7 @@ func (t *MsgTrace) MarkHandled() {
 	if t == nil || !traceEnabled.Load() {
 		return
 	}
+	t.HandledMono = benchtrace.ClockMonotonicNS()
 	t.Handled = time.Now()
 
 	select {
@@ -211,4 +271,11 @@ func nanos(t time.Time) string {
 		return ""
 	}
 	return strconv.FormatInt(t.UnixNano(), 10)
+}
+
+func mono(v int64) string {
+	if v == 0 {
+		return ""
+	}
+	return strconv.FormatInt(v, 10)
 }

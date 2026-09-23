@@ -3,6 +3,7 @@ package gmm
 import (
 	"time"
 
+	"github.com/free5gc/amf/internal/benchtrace"
 	"github.com/free5gc/amf/internal/context"
 	gmm_common "github.com/free5gc/amf/internal/gmm/common"
 	gmm_message "github.com/free5gc/amf/internal/gmm/message"
@@ -16,6 +17,7 @@ import (
 	"github.com/free5gc/ngap/ngapType"
 	"github.com/free5gc/openapi/models"
 	"github.com/free5gc/util/fsm"
+	"strconv"
 )
 
 func DeRegistered(state *fsm.State, event fsm.EventType, args fsm.ArgsType) {
@@ -350,6 +352,20 @@ func ContextSetup(state *fsm.State, event fsm.EventType, args fsm.ArgsType) {
 		amfUe := args[ArgAmfUe].(*context.AmfUe)
 		amfUe.GmmStateEnterTime = time.Now()
 		gmmMessage := args[ArgNASMessage]
+		if benchtrace.Enabled() {
+			if _, ok := gmmMessage.(*nasMessage.RegistrationRequest); ok {
+				if ranUe := amfUe.RanUe[accessType]; ranUe != nil {
+					gnbID, connID := "", ""
+					if ranUe.Ran != nil {
+						if ranUe.Ran.RanId != nil && ranUe.Ran.RanId.GNbId != nil {
+							gnbID = ranUe.Ran.RanId.GNbId.GNBValue
+						}
+						connID = benchtrace.ConnectionID(ranUe.Ran.Conn)
+					}
+					benchtrace.Record("context_setup_initiated", connID, gnbID, strconv.FormatInt(ranUe.RanUeNgapId, 10), strconv.FormatInt(ranUe.AmfUeNgapId, 10), benchtrace.HashSUPI(amfUe.Supi), "", 0)
+				}
+			}
+		}
 		amfUe.GmmLog.Debugln("EntryEvent at GMM State[ContextSetup]")
 
 		switch message := gmmMessage.(type) {

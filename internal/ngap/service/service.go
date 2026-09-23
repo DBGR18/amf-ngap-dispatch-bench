@@ -8,11 +8,14 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/free5gc/amf/internal/benchtrace"
 	"github.com/free5gc/amf/internal/logger"
 	ngap_internal "github.com/free5gc/amf/internal/ngap"
 	"github.com/free5gc/amf/pkg/factory"
 	"github.com/free5gc/ngap"
+	"github.com/free5gc/ngap/ngapType"
 	"github.com/free5gc/sctp"
+	"strconv"
 )
 
 type NGAPHandler struct {
@@ -236,6 +239,16 @@ func handleConnection(conn *sctp.SCTPConn, bufsize uint32, handler NGAPHandler) 
 				continue
 			}
 
+			// Capture at the SCTP reader before scheduling. Decode only when event tracing is enabled.
+			if benchtrace.Enabled() {
+				receivedAt := benchtrace.ClockMonotonicNS()
+				if pdu, err := ngap.Decoder(buf[:n]); err == nil && pdu != nil && pdu.Present == ngapType.NGAPPDUPresentInitiatingMessage && pdu.InitiatingMessage != nil && pdu.InitiatingMessage.ProcedureCode.Value == ngapType.ProcedureCodeInitialUEMessage {
+					if ranID, _, found := ngap_internal.ExtractUEIDFromPDU(pdu); found {
+						benchtrace.Record("initial_ue_message_received", benchtrace.ConnectionID(conn), "", strconv.FormatUint(ranID, 10), "", "", strconv.FormatInt(ngapType.ProcedureCodeInitialUEMessage, 10), receivedAt)
+					}
+				}
+			}
+
 			logger.NgapLog.Tracef("Read %d bytes", n)
 			logger.NgapLog.Tracef("Packet content:\n%+v", hex.Dump(buf[:n]))
 
@@ -248,6 +261,7 @@ func handleConnection(conn *sctp.SCTPConn, bufsize uint32, handler NGAPHandler) 
 // dispatchToWorkerPool extracts the UE ID and dispatches the task to the appropriate worker.
 // For non-UE messages (e.g., NGSetupRequest), it dispatches to a default worker (worker 0).
 func dispatchToWorkerPool(conn net.Conn, msg []byte, handler NGAPHandler) {
+
 	// Paper mode dispatches from inside the NGAP handler, at the NAS boundary,
 	// so there is nothing to decide here: run the handler on this goroutine and
 	// let it hand off when it has resolved the UE. A message that never reaches
@@ -261,7 +275,7 @@ func dispatchToWorkerPool(conn net.Conn, msg []byte, handler NGAPHandler) {
 
 	// Opened here, on the SCTP reader goroutine, so the trace covers every
 	// instruction that runs before the message reaches a worker.
-	trace := ngap_internal.NewMsgTrace()
+	trace := ngap_internal.NewMsgTrace(conn)
 
 	scheduler, err := ngap_internal.GetScheduler()
 	if err != nil {

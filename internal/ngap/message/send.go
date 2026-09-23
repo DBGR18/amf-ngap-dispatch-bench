@@ -3,6 +3,7 @@ package message
 import (
 	"time"
 
+	"github.com/free5gc/amf/internal/benchtrace"
 	"github.com/free5gc/amf/internal/context"
 	"github.com/free5gc/amf/internal/logger"
 	business_metrics "github.com/free5gc/amf/internal/metrics/business"
@@ -382,6 +383,9 @@ func SendPDUSessionResourceSetupRequest(ue *context.RanUe, nasPdu []byte,
 		return
 	}
 	isPDUSessResSetupReqSent, additionalCause = SendToRanUe(ue, pkt)
+	if isPDUSessResSetupReqSent {
+		benchtrace.RecordForRanUE("pdu_session_setup_sent", ue)
+	}
 }
 
 // pduSessionResourceModifyConfirmList: provided by AMF, and transfer data is return from SMF

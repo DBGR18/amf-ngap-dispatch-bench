@@ -15,6 +15,7 @@ import (
 	"github.com/mohae/deepcopy"
 	"github.com/pkg/errors"
 
+	"github.com/free5gc/amf/internal/benchtrace"
 	"github.com/free5gc/amf/internal/context"
 	gmm_common "github.com/free5gc/amf/internal/gmm/common"
 	gmm_message "github.com/free5gc/amf/internal/gmm/message"
@@ -88,6 +89,9 @@ func transport5GSMMessage(ue *context.AmfUe, anType models.AccessType,
 	ue.GmmLog.Info("Transport 5GSM Message to SMF")
 
 	smMessage := ulNasTransport.PayloadContainer.GetPayloadContainerContents()
+	if len(smMessage) > 3 && smMessage[3] == nas.MsgTypePDUSessionEstablishmentRequest {
+		benchtrace.RecordForRanUE("pdu_session_request_received", ue.RanUe[anType])
+	}
 
 	if id := ulNasTransport.PduSessionID2Value; id != nil {
 		pduSessionID = int32(id.GetPduSessionID2Value())
@@ -1660,6 +1664,19 @@ func HandleConfigurationUpdateComplete(ue *context.AmfUe,
 }
 
 func AuthenticationProcedure(ue *context.AmfUe, accessType models.AccessType) (bool, error) {
+	if benchtrace.Enabled() {
+		if ranUe := ue.RanUe[accessType]; ranUe != nil {
+			gnbID := ""
+			connID := ""
+			if ranUe.Ran != nil {
+				if ranUe.Ran.RanId != nil && ranUe.Ran.RanId.GNbId != nil {
+					gnbID = ranUe.Ran.RanId.GNbId.GNBValue
+				}
+				connID = benchtrace.ConnectionID(ranUe.Ran.Conn)
+			}
+			benchtrace.Record("authentication_initiated", connID, gnbID, strconv.FormatInt(ranUe.RanUeNgapId, 10), strconv.FormatInt(ranUe.AmfUeNgapId, 10), benchtrace.HashSUPI(ue.Supi), "", 0)
+		}
+	}
 	ue.GmmLog.Info("Authentication procedure")
 
 	// Check whether UE has SUCI and SUPI

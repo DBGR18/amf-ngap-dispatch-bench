@@ -284,7 +284,7 @@ func BeginSerialTrace(conn net.Conn) *MsgTrace {
 	if !serialTracingActive() || conn == nil {
 		return nil
 	}
-	t := NewMsgTrace()
+	t := NewMsgTrace(conn)
 	serialTraces.Store(conn, t)
 	return t
 }

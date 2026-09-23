@@ -10,6 +10,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 
+	"github.com/free5gc/amf/internal/benchtrace"
 	amf_context "github.com/free5gc/amf/internal/context"
 	"github.com/free5gc/amf/internal/logger"
 	business_metrics "github.com/free5gc/amf/internal/metrics/business"
@@ -199,6 +200,9 @@ func (a *AmfApp) Start() {
 
 	// No-op unless AMF_BENCH_TRACE is set; must precede InitScheduler so the
 	// very first message is already traced.
+	if err := benchtrace.Init(); err != nil {
+		logger.InitLog.Fatalf("AMF event trace init: %v", err)
+	}
 	ngap.InitTrace()
 	ngap.SetSchedulerMode(schedulerMode)
 	if schedulerMode == factory.NgapSchedulerModePaper {
@@ -323,6 +327,9 @@ func (a *AmfApp) terminateProcedure() {
 
 	// After the workers have drained, so no trace row is written post-close.
 	ngap.StopTrace()
+	if err := benchtrace.Stop(); err != nil {
+		logger.MainLog.Errorf("AMF event trace stop: %v", err)
+	}
 
 	ngap_service.Stop()
 
